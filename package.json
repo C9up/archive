@@ -1,0 +1,90 @@
+{
+	"name": "@c9up/archive",
+	"version": "0.1.0",
+	"description": "Archive — File storage abstraction for the Ream framework (Local + S3-compatible drivers)",
+	"license": "MIT",
+	"type": "module",
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"import": "./src/index.ts"
+		},
+		"./provider": {
+			"types": "./src/ArchiveProvider.ts",
+			"import": "./src/ArchiveProvider.ts"
+		},
+		"./services/main": {
+			"types": "./src/services/main.ts",
+			"import": "./src/services/main.ts"
+		},
+		"./signed-route": {
+			"types": "./src/signed-route.ts",
+			"import": "./src/signed-route.ts"
+		},
+		"./testing": {
+			"types": "./src/testing/FakeStorage.ts",
+			"import": "./src/testing/FakeStorage.ts"
+		}
+	},
+	"peerDependencies": {
+		"@c9up/ream": "^0.1.0"
+	},
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"typecheck": "tsc --noEmit",
+		"test": "vitest run",
+		"lint": "biome check src/",
+		"test:coverage": "vitest run --coverage"
+	},
+	"devDependencies": {
+		"typescript": "^6.0.2",
+		"vitest": "^4.1.2"
+	},
+	"files": [
+		"LICENSE",
+		"README.md",
+		"dist",
+		"src"
+	],
+	"engines": {
+		"node": ">=22.0.0"
+	},
+	"publishConfig": {
+		"main": "./dist/index.js",
+		"types": "./dist/index.d.ts",
+		"exports": {
+			".": {
+				"types": "./dist/index.d.ts",
+				"import": "./dist/index.js"
+			},
+			"./provider": {
+				"types": "./dist/ArchiveProvider.d.ts",
+				"import": "./dist/ArchiveProvider.js"
+			},
+			"./services/main": {
+				"types": "./dist/services/main.d.ts",
+				"import": "./dist/services/main.js"
+			},
+			"./signed-route": {
+				"types": "./dist/signed-route.d.ts",
+				"import": "./dist/signed-route.js"
+			},
+			"./testing": {
+				"types": "./dist/testing/FakeStorage.d.ts",
+				"import": "./dist/testing/FakeStorage.js"
+			}
+		},
+		"access": "public"
+	},
+	"peerDependenciesMeta": {
+		"@c9up/ream": {
+			"optional": true
+		}
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/C9up/archive.git"
+	}
+}
