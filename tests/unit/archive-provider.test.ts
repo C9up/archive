@@ -1,11 +1,31 @@
 import type { AppContext, ConfigStore } from "@c9up/ream";
-import { Container } from "@c9up/ream";
 import { describe, expect, it } from "vitest";
 import ArchiveProvider from "../../src/ArchiveProvider.js";
 import { LocalDriver, S3Driver, StorageManager } from "../../src/index.js";
 
 /**
- * Build a real `AppContext` using the real Ream `Container` + an
+ * Minimal container implementing the surface ArchiveProvider.register drives
+ * (`singleton` + caching `resolve`). Mirrors @c9up/ream's Container at the
+ * level this suite needs, keeping archive testable in isolation.
+ */
+class StubContainer {
+	readonly #factories = new Map<unknown, () => unknown>();
+	readonly #cache = new Map<unknown, unknown>();
+	singleton(token: unknown, factory: () => unknown): void {
+		this.#factories.set(token, factory);
+	}
+	resolve(token: unknown): unknown {
+		if (this.#cache.has(token)) return this.#cache.get(token);
+		const factory = this.#factories.get(token);
+		if (!factory) throw new Error(`no binding for ${String(token)}`);
+		const value = factory();
+		this.#cache.set(token, value);
+		return value;
+	}
+}
+
+/**
+ * Build an `AppContext` using the real Ream `Container` + an
  * in-memory ConfigStore. No duck-typed mocks, no double-casts.
  */
 function buildApp(initial: Record<string, unknown> = {}): AppContext {
@@ -18,7 +38,7 @@ function buildApp(initial: Record<string, unknown> = {}): AppContext {
 			store[key] = value;
 		},
 	};
-	return { container: new Container(), config };
+	return { container: new StubContainer(), config };
 }
 
 describe("ArchiveProvider", () => {
