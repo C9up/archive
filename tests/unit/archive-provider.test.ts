@@ -1,4 +1,4 @@
-import type { AppContext, ConfigStore } from "@c9up/ream";
+import type { AppContext, ConfigStoreContract } from "@c9up/ream";
 import { describe, expect, it } from "vitest";
 import ArchiveProvider from "../../src/ArchiveProvider.js";
 import { LocalDriver, S3Driver, StorageManager } from "../../src/index.js";
@@ -26,11 +26,11 @@ class StubContainer {
 
 /**
  * Build an `AppContext` using the real Ream `Container` + an
- * in-memory ConfigStore. No duck-typed mocks, no double-casts.
+ * in-memory ConfigStoreContract. No duck-typed mocks, no double-casts.
  */
 function buildApp(initial: Record<string, unknown> = {}): AppContext {
 	const store = { ...initial };
-	const config: ConfigStore = {
+	const config: ConfigStoreContract = {
 		get<T>(key: string): T | undefined {
 			return store[key] as T | undefined;
 		},
