@@ -30,7 +30,7 @@ import {
 	type StorageDriver,
 	StorageManager,
 } from "./StorageManager.js";
-import { _setStorage } from "./services/main.js";
+import { setStorage } from "./services/main.js";
 
 interface ArchiveContainer {
 	singleton(token: unknown, factory: () => unknown): void;
@@ -86,7 +86,7 @@ export default class ArchiveProvider {
 			return;
 		}
 		const manager = this.app.container.resolve<StorageManager>(StorageManager);
-		_setStorage(manager);
+		setStorage(manager);
 	}
 
 	async start(): Promise<void> {}
