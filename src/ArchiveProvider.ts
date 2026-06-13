@@ -46,7 +46,7 @@ export interface ArchiveAppContext {
 
 export interface ArchiveConfig {
 	driver: "local" | "s3" | "gcs";
-	local?: { root: string };
+	local?: { root: string; signingSecret?: string };
 	s3?: S3Config;
 	gcs?: GcsConfig;
 }
@@ -121,7 +121,9 @@ function buildDriver(config: ArchiveConfig): StorageDriver {
 	}
 	if (config.driver === "local") {
 		const root = config.local?.root ?? "./storage";
-		return new LocalDriver(root);
+		return new LocalDriver(root, {
+			signingSecret: config.local?.signingSecret,
+		});
 	}
 	// Reject unknown driver values explicitly so a typo like
 	// `{ driver: 'locla' }` does not silently fall through to the

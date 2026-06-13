@@ -54,6 +54,23 @@ describe("ArchiveProvider", () => {
 		expect(byAlias).toBe(byClass);
 	});
 
+	// Audit 2026-06-13: signingSecret was unreachable through the provider/config,
+	// so local signed URLs were dead via the framework path. This pins the wiring.
+	it("wires config.archive.local.signingSecret so signed URLs work via the framework path", async () => {
+		const app = buildApp({
+			archive: {
+				driver: "local",
+				local: { root: "./tmp-storage-signed", signingSecret: "a".repeat(32) },
+			},
+		});
+		new ArchiveProvider(app).register();
+		const manager = app.container.resolve<StorageManager>(StorageManager);
+		// Pre-fix: signingSecret never reached the LocalDriver → ARCHIVE_SIGNING_DISABLED.
+		const url = await manager.getSignedUrl("foo.txt");
+		expect(typeof url).toBe("string");
+		expect(url).toContain("foo.txt");
+	});
+
 	it("falls back to DEFAULT_CONFIG when app.config.get returns undefined", () => {
 		const app = buildApp({});
 		new ArchiveProvider(app).register();
