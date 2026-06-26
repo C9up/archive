@@ -594,6 +594,11 @@ export class StorageManager {
 		return this.#driver.url(filePath);
 	}
 
+	/** AdonisJS Drive name for {@link url}. */
+	getUrl(filePath: string): Promise<string> {
+		return this.#driver.url(filePath);
+	}
+
 	publicUrl(filePath: string): string {
 		return this.#driver.publicUrl(filePath);
 	}
@@ -606,6 +611,11 @@ export class StorageManager {
 	}
 
 	getMetadata(filePath: string): Promise<Metadata> {
+		return this.#driver.getMetadata(filePath);
+	}
+
+	/** AdonisJS Drive casing for {@link getMetadata}. */
+	getMetaData(filePath: string): Promise<Metadata> {
 		return this.#driver.getMetadata(filePath);
 	}
 

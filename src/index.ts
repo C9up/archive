@@ -9,6 +9,7 @@
  * signed-route handler for serving HMAC-signed Local URLs.
  */
 
+export type { ArchiveConfig } from "./ArchiveProvider.js";
 export { ArchiveError } from "./errors.js";
 export {
 	type GcsConfig,
@@ -39,3 +40,13 @@ export {
 	type SignedRouteOptions,
 	type SignedRouteResponse,
 } from "./signed-route.js";
+
+import type { ArchiveConfig } from "./ArchiveProvider.js";
+
+/**
+ * Author-time config helper for `config/drive.ts` — AdonisJS Drive `defineConfig`
+ * parity. Identity at runtime; the generic preserves literal types for inference.
+ */
+export function defineConfig<T extends ArchiveConfig>(config: T): T {
+	return config;
+}
