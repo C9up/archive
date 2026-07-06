@@ -9,13 +9,63 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { ArchiveError } from "./errors.js";
-import { assertValidExpiry, DEFAULT_EXPIRES_IN } from "./expiry.js";
+import {
+	assertValidExpiry,
+	DEFAULT_EXPIRES_IN,
+	parseExpiry,
+} from "./expiry.js";
 import { inferMimeType } from "./mime-types.js";
+import { DriveDirectory, DriveFile } from "./objects.js";
+
+export { DriveDirectory, DriveFile } from "./objects.js";
 
 /** Options for {@link StorageDriver.getSignedUrl}. */
 export interface SignedUrlOptions {
-	/** URL lifetime in seconds. Default: 300 (5 minutes). Bounds: 1–604800. */
-	expiresIn?: number;
+	/**
+	 * URL lifetime. Either a number of seconds or an AdonisJS-style
+	 * duration string (`'30mins'`, `'7 days'`, `'1h'`). Default: 300
+	 * (5 minutes). Bounds after parsing: 1–604800.
+	 */
+	expiresIn?: number | string;
+	/** Sets the response `Content-Type` served with the signed URL (cloud drivers). */
+	contentType?: string;
+	/** Sets the response `Content-Disposition` served with the signed URL (cloud drivers). */
+	contentDisposition?: string;
+}
+
+/**
+ * Options accepted by the write operations (`put`/`putStream`) and by
+ * `copy`/`move`. AdonisJS Drive `WriteOptions` parity. Cloud drivers map
+ * these onto object metadata headers; the LocalDriver honours only
+ * `visibility` (the rest have no filesystem equivalent).
+ */
+export interface WriteOptions {
+	/** Visibility to apply to the written / copied object. */
+	visibility?: Visibility;
+	/** `Content-Type` metadata. Falls back to extension-based inference. */
+	contentType?: string;
+	/** `Cache-Control` metadata (cloud drivers). */
+	cacheControl?: string;
+	/** `Content-Disposition` metadata (cloud drivers). */
+	contentDisposition?: string;
+	/** Declared byte length. Used by S3 to choose single-PUT vs multipart. */
+	contentLength?: number;
+}
+
+/** Result shape of {@link StorageDriver.listAll} — AdonisJS Drive parity. */
+export interface ListAllResult {
+	/** Continuation token to fetch the next page (cloud drivers only). */
+	paginationToken?: string;
+	/** Files and (non-recursive only) directories under the prefix. */
+	objects: Iterable<DriveFile | DriveDirectory>;
+}
+
+/** Options accepted by {@link StorageDriver.listAll}. */
+export interface ListAllOptions {
+	/** Recurse into sub-prefixes. When true, no directories are yielded. */
+	recursive?: boolean;
+	/** Continuation token from a previous page (cloud drivers only). */
+	paginationToken?: string;
 }
 
 /** Options for {@link StorageDriver.putStream}. */
@@ -55,9 +105,13 @@ export interface StorageEntry {
 export interface Metadata {
 	/** Size in bytes. */
 	size: number;
+	/** AdonisJS `ObjectMetaData` alias of {@link Metadata.size}. Same value. */
+	contentLength: number;
 	/** Content type. Driver-inferred for Local (extension-based), server-
 	 *  reported for S3. Falls back to `application/octet-stream`. */
 	mimeType: string;
+	/** AdonisJS `ObjectMetaData` alias of {@link Metadata.mimeType}. Same value. */
+	contentType: string;
 	/** Last-modified timestamp as a `Date` — not a string, not epoch ms. */
 	lastModified: Date;
 	/** Strong or weak ETag with surrounding quotes stripped. `W/` prefix
@@ -68,16 +122,20 @@ export interface Metadata {
 }
 
 /**
- * StorageDriver contract — frozen at v1.0 (Epic 43, 2026-05-05).
+ * StorageDriver contract — v1.1 (Epic 43, extended for AdonisJS Drive /
+ * flydrive parity 2026-07-06).
  *
  * Driver authors implement this interface verbatim. The interface is treated
- * as a stable contract: new methods are NOT added without a version-bump + a
- * 2-epic deprecation window. Optional fields are added in minor versions.
- * Method signatures never change in-place — a renamed method ships as a new
- * method + the old one delegating, deprecated for ≥1 epic.
+ * as a stable contract: methods are added only to track upstream Drive
+ * parity. Method signatures never change in-place — a renamed method ships as
+ * a new method + the old one delegating, deprecated for ≥1 epic.
  */
 export interface StorageDriver {
-	put(filePath: string, content: Buffer | string): Promise<void>;
+	put(
+		filePath: string,
+		content: Buffer | string,
+		options?: WriteOptions,
+	): Promise<void>;
 	/**
 	 * Upload from a readable stream. Local pipes to disk; S3 uses
 	 * single-PUT if `contentLength ≤ 5 MiB`, otherwise multipart.
@@ -87,7 +145,22 @@ export interface StorageDriver {
 		readable: NodeJS.ReadableStream,
 		options?: PutStreamOptions,
 	): Promise<void>;
+	/**
+	 * Raw contents as a `Buffer`, or `null` when the object is absent.
+	 *
+	 * DIVERGENCE from AdonisJS Drive (documented, deliberate): Adonis
+	 * `get()` returns a UTF-8 `string` and throws on absence. Ream keeps
+	 * the binary-safe `Buffer | null` shape as a superset. Use
+	 * {@link StorageDriver.getBytes} for the Adonis-shaped, throw-on-
+	 * absence accessor.
+	 */
 	get(filePath: string): Promise<Buffer | null>;
+	/**
+	 * Contents as a `Uint8Array`. AdonisJS Drive parity. Throws
+	 * `ARCHIVE_NOT_FOUND` when the object is absent (unlike {@link get},
+	 * a byte accessor can't express absence as a value).
+	 */
+	getBytes(filePath: string): Promise<Uint8Array>;
 	/**
 	 * Download as a readable stream. Throws `ARCHIVE_NOT_FOUND` when
 	 * the object is missing — streams can't express absence as a value.
@@ -118,10 +191,25 @@ export interface StorageDriver {
 		options?: SignedUrlOptions,
 	): string | Promise<string>;
 	/**
+	 * Return a time-boxed URL that grants **write** (PUT) access, letting
+	 * a client upload directly to the backend. AdonisJS Drive parity.
+	 * Cloud-only — the LocalDriver has no presigned-upload equivalent and
+	 * throws `ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED`.
+	 */
+	getSignedUploadUrl(
+		filePath: string,
+		options?: SignedUrlOptions,
+	): string | Promise<string>;
+	/**
 	 * Resolve object metadata. Throws `ArchiveError('ARCHIVE_NOT_FOUND', ...)`
 	 * when the object does not exist.
 	 */
 	getMetadata(filePath: string): Promise<Metadata>;
+	/**
+	 * Resolve the `public` / `private` visibility of an object on its own,
+	 * without a full metadata round-trip. AdonisJS Drive parity.
+	 */
+	getVisibility(filePath: string): Promise<Visibility>;
 	/**
 	 * Set `public` / `private` visibility. Idempotent — re-applying the
 	 * same visibility succeeds silently.
@@ -130,22 +218,36 @@ export interface StorageDriver {
 	/**
 	 * Duplicate an object. Throws `ARCHIVE_NOT_FOUND` if `from` is
 	 * missing. Target is overwritten if it exists. Visibility is NOT
-	 * carried over — the new object takes default visibility.
+	 * carried over unless `options.visibility` is passed — the new object
+	 * takes default visibility.
 	 */
-	copy(from: string, to: string): Promise<void>;
+	copy(from: string, to: string, options?: WriteOptions): Promise<void>;
 	/**
 	 * Relocate an object. Equivalent to `copy` + `delete` on cloud
 	 * drivers (non-atomic between the two steps); atomic `rename` on
 	 * Local. Visibility IS preserved because identity is preserved.
 	 */
-	move(from: string, to: string): Promise<void>;
+	move(from: string, to: string, options?: WriteOptions): Promise<void>;
+	/**
+	 * Delete every object whose path starts with `prefix`. Local removes
+	 * the matching files (and prunes emptied directories); S3 batch-deletes;
+	 * GCS deletes per object. AdonisJS Drive parity.
+	 */
+	deleteAll(prefix: string): Promise<void>;
 	/**
 	 * Yield one {@link StorageEntry} per object whose path starts with
 	 * `prefix`. Pagination (S3/GCS) and filesystem walk (Local) happen
 	 * lazily — callers can `break` early and no further requests are
-	 * issued.
+	 * issued. Ream superset — kept alongside the Adonis-shaped
+	 * {@link StorageDriver.listAll}.
 	 */
 	list(prefix: string): AsyncIterable<StorageEntry>;
+	/**
+	 * AdonisJS Drive `listAll`: a single page of {@link DriveFile} (and,
+	 * when non-recursive, {@link DriveDirectory}) entries plus an optional
+	 * pagination token.
+	 */
+	listAll(prefix: string, options?: ListAllOptions): Promise<ListAllResult>;
 }
 
 export interface LocalDriverOptions {
@@ -238,13 +340,34 @@ export class LocalDriver implements StorageDriver {
 		return full;
 	}
 
-	async put(filePath: string, content: Buffer | string): Promise<void> {
+	async put(
+		filePath: string,
+		content: Buffer | string,
+		options?: WriteOptions,
+	): Promise<void> {
 		const full = this.#safePath(filePath);
 		const dir = path.dirname(full);
 		if (!fs.existsSync(dir)) {
 			fs.mkdirSync(dir, { recursive: true });
 		}
 		fs.writeFileSync(full, content);
+		// Only `visibility` has a filesystem-equivalent (the sidecar).
+		// contentType/cacheControl/... have no local meaning.
+		if (options?.visibility !== undefined) {
+			await this.setVisibility(filePath, options.visibility);
+		}
+	}
+
+	async getBytes(filePath: string): Promise<Uint8Array> {
+		const buf = await this.get(filePath);
+		if (buf === null) {
+			throw new ArchiveError(
+				"ARCHIVE_NOT_FOUND",
+				`File does not exist at path '${filePath}'`,
+				{ hint: "Confirm the path and that the file was put() first." },
+			);
+		}
+		return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 	}
 
 	async putStream(
@@ -346,13 +469,20 @@ export class LocalDriver implements StorageDriver {
 		const etagBody = createHash("sha1")
 			.update(`${stat.ino}-${stat.size}-${stat.mtimeMs}`)
 			.digest("hex");
+		const mimeType = inferMimeType(path.extname(filePath).toLowerCase());
 		return {
 			size: stat.size,
-			mimeType: inferMimeType(path.extname(filePath).toLowerCase()),
+			contentLength: stat.size,
+			mimeType,
+			contentType: mimeType,
 			lastModified: stat.mtime,
 			etag: `W/"${etagBody}"`,
 			visibility: this.#readVisibility(filePath),
 		};
+	}
+
+	async getVisibility(filePath: string): Promise<Visibility> {
+		return this.#readVisibility(filePath);
 	}
 
 	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
@@ -412,7 +542,7 @@ export class LocalDriver implements StorageDriver {
 		// can never be served — `storage.get()` would reject it later via
 		// `#safePath`, but signing-time errors are easier to diagnose.
 		this.#safePath(filePath);
-		const expiresIn = options?.expiresIn ?? DEFAULT_EXPIRES_IN;
+		const expiresIn = parseExpiry(options?.expiresIn ?? DEFAULT_EXPIRES_IN);
 		assertValidExpiry(expiresIn);
 		const secret = this.#signingSecret;
 		if (secret === null) {
@@ -434,6 +564,21 @@ export class LocalDriver implements StorageDriver {
 	}
 
 	/**
+	 * The LocalDriver serves uploads through the app (not a presigned
+	 * PUT to an object store), so there is no presigned-upload URL to
+	 * hand out. Fail loudly rather than return an unusable value.
+	 */
+	getSignedUploadUrl(_filePath: string, _options?: SignedUrlOptions): string {
+		throw new ArchiveError(
+			"ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED",
+			"LocalDriver does not support presigned upload URLs",
+			{
+				hint: "Presigned uploads are an S3/GCS feature. For local storage, upload through your app's HTTP handler.",
+			},
+		);
+	}
+
+	/**
 	 * @internal Used by the signed-route middleware to re-compute the
 	 * HMAC server-side. Not part of the public `StorageDriver` contract.
 	 */
@@ -441,7 +586,7 @@ export class LocalDriver implements StorageDriver {
 		return this.#signingSecret;
 	}
 
-	async copy(from: string, to: string): Promise<void> {
+	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const fromFull = this.#safePath(from);
 		const toFull = this.#safePath(to);
 		if (!fs.existsSync(fromFull)) {
@@ -455,10 +600,13 @@ export class LocalDriver implements StorageDriver {
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 		fs.copyFileSync(fromFull, toFull);
 		// Intentionally do NOT copy the visibility sidecar — new object
-		// takes default visibility. Documented in the story spec.
+		// takes default visibility unless the caller asks otherwise.
+		if (options?.visibility !== undefined) {
+			await this.setVisibility(to, options.visibility);
+		}
 	}
 
-	async move(from: string, to: string): Promise<void> {
+	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const fromFull = this.#safePath(from);
 		const toFull = this.#safePath(to);
 		if (!fs.existsSync(fromFull)) {
@@ -524,6 +672,83 @@ export class LocalDriver implements StorageDriver {
 				}
 			}
 		}
+		// An explicit visibility override wins over the preserved value.
+		if (options?.visibility !== undefined) {
+			await this.setVisibility(to, options.visibility);
+		}
+	}
+
+	async deleteAll(prefix: string): Promise<void> {
+		// Walk the existing listing (already sidecar-aware + safe) and
+		// remove every match. delete() also drops each file's sidecar.
+		const paths: string[] = [];
+		for await (const entry of this.list(prefix)) {
+			paths.push(entry.path);
+		}
+		for (const p of paths) {
+			await this.delete(p);
+		}
+		// Prune the prefix directory itself when it is now empty, mirroring
+		// flydrive's "the folder is deleted" behaviour. Best-effort.
+		const dir = this.#safePath(prefix);
+		if (dir !== this.#root && fs.existsSync(dir)) {
+			try {
+				const stat = fs.statSync(dir);
+				if (stat.isDirectory() && fs.readdirSync(dir).length === 0) {
+					fs.rmdirSync(dir);
+				}
+			} catch {
+				// benign — leave non-empty / vanished dirs alone.
+			}
+		}
+	}
+
+	async listAll(
+		prefix: string,
+		options?: ListAllOptions,
+	): Promise<ListAllResult> {
+		const recursive = options?.recursive ?? false;
+		const files: DriveFile[] = [];
+		const directories = new Map<string, DriveDirectory>();
+		const normalizedPrefix =
+			prefix === "" || prefix === "/"
+				? ""
+				: prefix.endsWith("/")
+					? prefix
+					: `${prefix}/`;
+		for await (const entry of this.list(normalizedPrefix)) {
+			if (recursive) {
+				files.push(new DriveFile(entry.path, this, this.#entryMetadata(entry)));
+				continue;
+			}
+			// Non-recursive: collapse anything below the immediate level
+			// into a DriveDirectory marker.
+			const rest = entry.path.slice(normalizedPrefix.length);
+			const slash = rest.indexOf("/");
+			if (slash === -1) {
+				files.push(new DriveFile(entry.path, this, this.#entryMetadata(entry)));
+			} else {
+				const dirPrefix = normalizedPrefix + rest.slice(0, slash);
+				if (!directories.has(dirPrefix)) {
+					directories.set(dirPrefix, new DriveDirectory(dirPrefix));
+				}
+			}
+		}
+		return { objects: [...directories.values(), ...files] };
+	}
+
+	/** Build a metadata snapshot from a cheap `list()` entry (no extra stat). */
+	#entryMetadata(entry: StorageEntry): Metadata {
+		const mimeType = inferMimeType(path.extname(entry.path).toLowerCase());
+		return {
+			size: entry.size,
+			contentLength: entry.size,
+			mimeType,
+			contentType: mimeType,
+			lastModified: entry.lastModified,
+			etag: "",
+			visibility: this.#readVisibility(entry.path),
+		};
 	}
 
 	async *list(prefix: string): AsyncIterable<StorageEntry> {
@@ -562,8 +787,12 @@ export class StorageManager {
 		this.#driver = driver;
 	}
 
-	put(filePath: string, content: Buffer | string): Promise<void> {
-		return this.#driver.put(filePath, content);
+	put(
+		filePath: string,
+		content: Buffer | string,
+		options?: WriteOptions,
+	): Promise<void> {
+		return this.#driver.put(filePath, content, options);
 	}
 
 	putStream(
@@ -576,6 +805,16 @@ export class StorageManager {
 
 	get(filePath: string): Promise<Buffer | null> {
 		return this.#driver.get(filePath);
+	}
+
+	/** Contents as a `Uint8Array`. Throws `ARCHIVE_NOT_FOUND` if absent. */
+	getBytes(filePath: string): Promise<Uint8Array> {
+		return this.#driver.getBytes(filePath);
+	}
+
+	/** @deprecated AdonisJS Drive alias — use {@link StorageManager.getBytes}. */
+	getArrayBuffer(filePath: string): Promise<Uint8Array> {
+		return this.#driver.getBytes(filePath);
 	}
 
 	getStream(filePath: string): Promise<NodeJS.ReadableStream> {
@@ -610,6 +849,13 @@ export class StorageManager {
 		return this.#driver.getSignedUrl(filePath, options);
 	}
 
+	getSignedUploadUrl(
+		filePath: string,
+		options?: SignedUrlOptions,
+	): string | Promise<string> {
+		return this.#driver.getSignedUploadUrl(filePath, options);
+	}
+
 	getMetadata(filePath: string): Promise<Metadata> {
 		return this.#driver.getMetadata(filePath);
 	}
@@ -619,19 +865,32 @@ export class StorageManager {
 		return this.#driver.getMetadata(filePath);
 	}
 
+	getVisibility(filePath: string): Promise<Visibility> {
+		return this.#driver.getVisibility(filePath);
+	}
+
 	setVisibility(filePath: string, visibility: Visibility): Promise<void> {
 		return this.#driver.setVisibility(filePath, visibility);
 	}
 
-	copy(from: string, to: string): Promise<void> {
-		return this.#driver.copy(from, to);
+	copy(from: string, to: string, options?: WriteOptions): Promise<void> {
+		return this.#driver.copy(from, to, options);
 	}
 
-	move(from: string, to: string): Promise<void> {
-		return this.#driver.move(from, to);
+	move(from: string, to: string, options?: WriteOptions): Promise<void> {
+		return this.#driver.move(from, to, options);
+	}
+
+	deleteAll(prefix: string): Promise<void> {
+		return this.#driver.deleteAll(prefix);
 	}
 
 	list(prefix: string): AsyncIterable<StorageEntry> {
 		return this.#driver.list(prefix);
+	}
+
+	/** AdonisJS Drive `listAll` — paged {@link DriveFile}/{@link DriveDirectory}. */
+	listAll(prefix: string, options?: ListAllOptions): Promise<ListAllResult> {
+		return this.#driver.listAll(prefix, options);
 	}
 }

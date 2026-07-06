@@ -1,12 +1,13 @@
-import type { AppContext } from "@c9up/ream";
 import { describe, expect, it } from "vitest";
+import type { ArchiveAppContext } from "../../src/ArchiveProvider.js";
 import ArchiveProvider from "../../src/ArchiveProvider.js";
 import { LocalDriver, S3Driver, StorageManager } from "../../src/index.js";
 
 /**
  * Minimal container implementing the surface ArchiveProvider.register drives
- * (`singleton` + caching `resolve`). Mirrors @c9up/ream's Container at the
- * level this suite needs, keeping archive testable in isolation.
+ * (`singleton` + caching `resolve`). Mirrors the `ArchiveContainer` surface
+ * the provider duck-types against — archive stays agnostic (no @c9up/ream
+ * import), so this suite runs in isolation.
  */
 class StubContainer {
 	readonly #factories = new Map<unknown, () => unknown>();
@@ -14,24 +15,25 @@ class StubContainer {
 	singleton(token: unknown, factory: () => unknown): void {
 		this.#factories.set(token, factory);
 	}
-	resolve(token: unknown): unknown {
-		if (this.#cache.has(token)) return this.#cache.get(token);
+	resolve<T = unknown>(token: unknown): T {
+		if (this.#cache.has(token)) return this.#cache.get(token) as T;
 		const factory = this.#factories.get(token);
 		if (!factory) throw new Error(`no binding for ${String(token)}`);
 		const value = factory();
 		this.#cache.set(token, value);
-		return value;
+		return value as T;
 	}
 }
 
 /**
- * Build an `AppContext` using the real Ream `Container` + an
- * in-memory ConfigStore. No duck-typed mocks, no double-casts.
+ * Build the agnostic `ArchiveAppContext` the provider consumes — the
+ * StubContainer + an in-memory ConfigStore. The provider never imports
+ * @c9up/ream, so this mirrors exactly the surface it duck-types against.
  */
-function buildApp(initial: Record<string, unknown> = {}): AppContext {
+function buildApp(initial: Record<string, unknown> = {}): ArchiveAppContext {
 	const store = { ...initial };
 	const config = {
-		get<T>(key: string): T | undefined {
+		get<T = unknown>(key: string): T | undefined {
 			return store[key] as T | undefined;
 		},
 		set(key: string, value: unknown): void {

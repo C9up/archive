@@ -13,19 +13,29 @@
  * Kept behind the `./testing` subpath so production imports stay clean.
  */
 
+import { AssertionError } from "node:assert";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import { ArchiveError } from "../errors.js";
-import { assertValidExpiry, DEFAULT_EXPIRES_IN } from "../expiry.js";
+import {
+	assertValidExpiry,
+	DEFAULT_EXPIRES_IN,
+	parseExpiry,
+} from "../expiry.js";
 import { inferMimeType } from "../mime-types.js";
+import { DriveDirectory, DriveFile } from "../objects.js";
 import type {
+	ListAllOptions,
+	ListAllResult,
 	Metadata,
 	PutStreamOptions,
 	SignedUrlOptions,
 	StorageDriver,
 	StorageEntry,
 	Visibility,
+	WriteOptions,
 } from "../StorageManager.js";
+import { StorageManager } from "../StorageManager.js";
 
 interface StoredObject {
 	content: Buffer;
@@ -41,15 +51,35 @@ const FAKE_SECRET = "archive-fake-signing-secret-do-not-use-in-prod";
 export class FakeStorage implements StorageDriver {
 	#store = new Map<string, StoredObject>();
 
-	async put(filePath: string, content: Buffer | string): Promise<void> {
+	async put(
+		filePath: string,
+		content: Buffer | string,
+		options?: WriteOptions,
+	): Promise<void> {
 		const buf = typeof content === "string" ? Buffer.from(content) : content;
 		this.#store.set(filePath, {
 			content: Buffer.from(buf),
-			visibility: this.#store.get(filePath)?.visibility ?? "public",
+			visibility:
+				options?.visibility ??
+				this.#store.get(filePath)?.visibility ??
+				"public",
 			lastModified: new Date(),
 			mimeType:
-				inferMimeType(extFromPath(filePath)) || "application/octet-stream",
+				options?.contentType ??
+				(inferMimeType(extFromPath(filePath)) || "application/octet-stream"),
 		});
+	}
+
+	async getBytes(filePath: string): Promise<Uint8Array> {
+		const obj = this.#store.get(filePath);
+		if (!obj) {
+			throw new ArchiveError(
+				"ARCHIVE_NOT_FOUND",
+				`Fake object does not exist at path '${filePath}'`,
+				{ hint: "put() it first, or verify the test setup." },
+			);
+		}
+		return new Uint8Array(obj.content);
 	}
 
 	async putStream(
@@ -110,13 +140,35 @@ export class FakeStorage implements StorageDriver {
 	}
 
 	getSignedUrl(filePath: string, options?: SignedUrlOptions): string {
-		const expiresIn = options?.expiresIn ?? DEFAULT_EXPIRES_IN;
+		const expiresIn = parseExpiry(options?.expiresIn ?? DEFAULT_EXPIRES_IN);
 		assertValidExpiry(expiresIn);
 		const exp = Math.floor(Date.now() / 1000) + expiresIn;
 		const sig = createHash("sha256")
 			.update(`${filePath}.${exp}.${FAKE_SECRET}`)
 			.digest("hex");
 		return `fake://${filePath}?exp=${exp}&sig=${sig}`;
+	}
+
+	getSignedUploadUrl(filePath: string, options?: SignedUrlOptions): string {
+		const expiresIn = parseExpiry(options?.expiresIn ?? DEFAULT_EXPIRES_IN);
+		assertValidExpiry(expiresIn);
+		const exp = Math.floor(Date.now() / 1000) + expiresIn;
+		const sig = createHash("sha256")
+			.update(`upload.${filePath}.${exp}.${FAKE_SECRET}`)
+			.digest("hex");
+		return `fake://${filePath}?upload=1&exp=${exp}&sig=${sig}`;
+	}
+
+	async getVisibility(filePath: string): Promise<Visibility> {
+		const obj = this.#store.get(filePath);
+		if (!obj) {
+			throw new ArchiveError(
+				"ARCHIVE_NOT_FOUND",
+				`Fake object does not exist at path '${filePath}'`,
+				{ hint: "put() it first, or verify the test setup." },
+			);
+		}
+		return obj.visibility;
 	}
 
 	async getMetadata(filePath: string): Promise<Metadata> {
@@ -133,7 +185,9 @@ export class FakeStorage implements StorageDriver {
 		const etagBody = createHash("sha1").update(obj.content).digest("hex");
 		return {
 			size: obj.content.length,
+			contentLength: obj.content.length,
 			mimeType: obj.mimeType,
+			contentType: obj.mimeType,
 			lastModified: obj.lastModified,
 			etag: `W/"${etagBody}"`,
 			visibility: obj.visibility,
@@ -152,7 +206,7 @@ export class FakeStorage implements StorageDriver {
 		obj.visibility = visibility;
 	}
 
-	async copy(from: string, to: string): Promise<void> {
+	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const src = this.#store.get(from);
 		if (!src) {
 			throw new ArchiveError(
@@ -162,16 +216,16 @@ export class FakeStorage implements StorageDriver {
 			);
 		}
 		// Default visibility on the new object — matches LocalDriver
-		// semantics (AC 4 from Story 43.6).
+		// semantics (AC 4 from Story 43.6) unless the caller overrides it.
 		this.#store.set(to, {
 			content: Buffer.from(src.content),
-			visibility: "public",
+			visibility: options?.visibility ?? "public",
 			lastModified: new Date(),
-			mimeType: src.mimeType,
+			mimeType: options?.contentType ?? src.mimeType,
 		});
 	}
 
-	async move(from: string, to: string): Promise<void> {
+	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const src = this.#store.get(from);
 		if (!src) {
 			throw new ArchiveError(
@@ -180,9 +234,20 @@ export class FakeStorage implements StorageDriver {
 				{ hint: "Confirm the source path was put() first." },
 			);
 		}
-		// Move preserves visibility — identity is preserved.
-		this.#store.set(to, { ...src, content: Buffer.from(src.content) });
+		// Move preserves visibility — identity is preserved (an explicit
+		// override wins).
+		this.#store.set(to, {
+			...src,
+			content: Buffer.from(src.content),
+			visibility: options?.visibility ?? src.visibility,
+		});
 		this.#store.delete(from);
+	}
+
+	async deleteAll(prefix: string): Promise<void> {
+		for (const key of [...this.#store.keys()]) {
+			if (key.startsWith(prefix)) this.#store.delete(key);
+		}
 	}
 
 	async *list(prefix: string): AsyncIterable<StorageEntry> {
@@ -190,6 +255,45 @@ export class FakeStorage implements StorageDriver {
 			if (!path.startsWith(prefix)) continue;
 			yield { path, size: obj.content.length, lastModified: obj.lastModified };
 		}
+	}
+
+	async listAll(
+		prefix: string,
+		options?: ListAllOptions,
+	): Promise<ListAllResult> {
+		const recursive = options?.recursive ?? false;
+		const normalizedPrefix =
+			prefix === "" || prefix === "/"
+				? ""
+				: prefix.endsWith("/")
+					? prefix
+					: `${prefix}/`;
+		const files: DriveFile[] = [];
+		const directories = new Map<string, DriveDirectory>();
+		for (const [key, obj] of this.#store) {
+			if (!key.startsWith(normalizedPrefix)) continue;
+			const rest = key.slice(normalizedPrefix.length);
+			const slash = rest.indexOf("/");
+			if (recursive || slash === -1) {
+				files.push(
+					new DriveFile(key, this, {
+						size: obj.content.length,
+						contentLength: obj.content.length,
+						mimeType: obj.mimeType,
+						contentType: obj.mimeType,
+						lastModified: obj.lastModified,
+						etag: "",
+						visibility: obj.visibility,
+					}),
+				);
+			} else {
+				const dirPrefix = normalizedPrefix + rest.slice(0, slash);
+				if (!directories.has(dirPrefix)) {
+					directories.set(dirPrefix, new DriveDirectory(dirPrefix));
+				}
+			}
+		}
+		return { objects: [...directories.values(), ...files] };
 	}
 
 	/** Test helper — wipe all state. */
@@ -243,6 +347,35 @@ export class FakeStorage implements StorageDriver {
 		return out;
 	}
 
+	/**
+	 * AdonisJS Drive parity: assert the given path(s) exist. Throws a
+	 * Node `AssertionError` otherwise. Complements the richer
+	 * {@link FakeStorage.assertStored} predicate form (kept as a superset).
+	 */
+	assertExists(paths: string | string[]): void {
+		for (const p of Array.isArray(paths) ? paths : [paths]) {
+			if (!this.#store.has(p)) {
+				throw new AssertionError({
+					message: `Expected "${p}" to exist, but file not found.`,
+				});
+			}
+		}
+	}
+
+	/**
+	 * AdonisJS Drive parity: assert the given path(s) do NOT exist. Throws
+	 * a Node `AssertionError` otherwise.
+	 */
+	assertMissing(paths: string | string[]): void {
+		for (const p of Array.isArray(paths) ? paths : [paths]) {
+			if (this.#store.has(p)) {
+				throw new AssertionError({
+					message: `Expected "${p}" to be missing, but file exists.`,
+				});
+			}
+		}
+	}
+
 	assertStored(path: string, predicate?: FakeStoragePredicateArg): void {
 		const match = makeStorageMatcher(path, predicate);
 		for (const [p, obj] of this.#store) {
@@ -262,6 +395,52 @@ export class FakeStorage implements StorageDriver {
 				);
 			}
 		}
+	}
+}
+
+/**
+ * A {@link StorageManager} backed by an in-memory {@link FakeStorage},
+ * surfacing the fake's assertion helpers. Returned by
+ * `DriveManager.fake()` — mirrors flydrive's `FakeDisk extends Disk`, so
+ * `use()` and `fake()` are drop-in compatible.
+ */
+export class FakeStorageManager extends StorageManager {
+	#fake: FakeStorage;
+
+	constructor() {
+		const fake = new FakeStorage();
+		super(fake);
+		this.#fake = fake;
+	}
+
+	/** AdonisJS Drive parity — assert the given path(s) exist. */
+	assertExists(paths: string | string[]): void {
+		this.#fake.assertExists(paths);
+	}
+
+	/** AdonisJS Drive parity — assert the given path(s) do NOT exist. */
+	assertMissing(paths: string | string[]): void {
+		this.#fake.assertMissing(paths);
+	}
+
+	/** Ream superset — predicate-based captured-object assertion. */
+	assertStored(path: string, predicate?: FakeStoragePredicateArg): void {
+		this.#fake.assertStored(path, predicate);
+	}
+
+	/** Ream superset — negated predicate assertion. */
+	assertNotStored(path: string, predicate?: FakeStoragePredicateArg): void {
+		this.#fake.assertNotStored(path, predicate);
+	}
+
+	/** Snapshot of the captured objects. */
+	getStored(): ReturnType<FakeStorage["getStored"]> {
+		return this.#fake.getStored();
+	}
+
+	/** Wipe all in-memory state. */
+	clear(): void {
+		this.#fake.clear();
 	}
 }
 

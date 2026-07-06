@@ -13,15 +13,23 @@ import { createHash, createSign } from "node:crypto";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { ArchiveError } from "./errors.js";
-import { assertValidExpiry, DEFAULT_EXPIRES_IN } from "./expiry.js";
+import {
+	assertValidExpiry,
+	DEFAULT_EXPIRES_IN,
+	parseExpiry,
+} from "./expiry.js";
 import { inferMimeType } from "./mime-types.js";
+import { DriveDirectory, DriveFile } from "./objects.js";
 import type {
+	ListAllOptions,
+	ListAllResult,
 	Metadata,
 	PutStreamOptions,
 	SignedUrlOptions,
 	StorageDriver,
 	StorageEntry,
 	Visibility,
+	WriteOptions,
 } from "./StorageManager.js";
 
 /** GCS V4 strict URL encoding — identical to AWS's RFC3986-unreserved
@@ -97,23 +105,51 @@ export class GcsDriver implements StorageDriver {
 		this.#config = config;
 	}
 
-	async put(filePath: string, content: Buffer | string): Promise<void> {
+	async put(
+		filePath: string,
+		content: Buffer | string,
+		options?: WriteOptions,
+	): Promise<void> {
 		const body = typeof content === "string" ? Buffer.from(content) : content;
 		const token = await this.#getAccessToken();
 		const url = `${GCS_UPLOAD_ROOT}/b/${this.#config.bucket}/o?uploadType=media&name=${gcsStrictEncode(filePath)}`;
 		const mime =
-			inferMimeType(extFromPath(filePath)) || "application/octet-stream";
+			options?.contentType ??
+			(inferMimeType(extFromPath(filePath)) || "application/octet-stream");
+		const headers: Record<string, string> = {
+			authorization: `Bearer ${token}`,
+			"content-type": mime,
+		};
+		if (options?.cacheControl) headers["cache-control"] = options.cacheControl;
+		if (options?.contentDisposition) {
+			headers["content-disposition"] = options.contentDisposition;
+		}
 		const res = await fetch(url, {
 			method: "POST",
-			headers: {
-				authorization: `Bearer ${token}`,
-				"content-type": mime,
-			},
+			headers,
 			body: body as BodyInit,
 		});
 		if (!res.ok) {
 			throw new Error(`GCS PUT failed (${res.status}): ${await res.text()}`);
 		}
+		// GCS has no ACL in the media-upload call; apply visibility after.
+		if (options?.visibility !== undefined) {
+			await this.setVisibility(filePath, options.visibility);
+		}
+	}
+
+	async getBytes(filePath: string): Promise<Uint8Array> {
+		const buf = await this.get(filePath);
+		if (buf === null) {
+			throw new ArchiveError(
+				"ARCHIVE_NOT_FOUND",
+				`GCS object does not exist at path '${filePath}'`,
+				{
+					hint: "Confirm the bucket + key and that the object was put() first.",
+				},
+			);
+		}
+		return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 	}
 
 	async putStream(
@@ -251,13 +287,21 @@ export class GcsDriver implements StorageDriver {
 				? "public"
 				: "private"
 			: "private";
+		const size = Number.parseInt(json.size ?? "0", 10);
+		const mimeType = json.contentType ?? "application/octet-stream";
 		return {
-			size: Number.parseInt(json.size ?? "0", 10),
-			mimeType: json.contentType ?? "application/octet-stream",
+			size,
+			contentLength: size,
+			mimeType,
+			contentType: mimeType,
 			lastModified: json.updated ? new Date(json.updated) : new Date(0),
 			etag: (json.etag ?? "").replace(/^(W\/)?"(.*)"$/, "$1$2"),
 			visibility,
 		};
+	}
+
+	async getVisibility(filePath: string): Promise<Visibility> {
+		return (await this.getMetadata(filePath)).visibility;
 	}
 
 	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
@@ -291,7 +335,7 @@ export class GcsDriver implements StorageDriver {
 		}
 	}
 
-	async copy(from: string, to: string): Promise<void> {
+	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(from)}/copyTo/b/${this.#config.bucket}/o/${gcsEncodeKey(to)}`;
 		const res = await fetch(url, {
@@ -308,12 +352,85 @@ export class GcsDriver implements StorageDriver {
 		if (!res.ok) {
 			throw new Error(`GCS COPY failed (${res.status}): ${await res.text()}`);
 		}
+		if (options?.visibility !== undefined) {
+			await this.setVisibility(to, options.visibility);
+		}
 	}
 
-	async move(from: string, to: string): Promise<void> {
+	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
 		// Non-atomic: copy then delete. Same as S3.
-		await this.copy(from, to);
+		await this.copy(from, to, options);
 		await this.delete(from);
+	}
+
+	async deleteAll(prefix: string): Promise<void> {
+		// GCS has no batch-delete endpoint; drain the listing one object at
+		// a time. `list()` already paginates lazily.
+		const keys: string[] = [];
+		for await (const entry of this.list(prefix)) {
+			keys.push(entry.path);
+		}
+		for (const key of keys) {
+			await this.delete(key);
+		}
+	}
+
+	async listAll(
+		prefix: string,
+		options?: ListAllOptions,
+	): Promise<ListAllResult> {
+		const recursive = options?.recursive ?? false;
+		const normalizedPrefix =
+			prefix === "" || prefix === "/"
+				? ""
+				: !recursive && !prefix.endsWith("/")
+					? `${prefix}/`
+					: prefix;
+		const params = new URLSearchParams({ prefix: normalizedPrefix });
+		if (!recursive) params.set("delimiter", "/");
+		if (options?.paginationToken) {
+			params.set("pageToken", options.paginationToken);
+		}
+		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o?${params.toString()}`;
+		const token = await this.#getAccessToken();
+		const res = await fetch(url, {
+			method: "GET",
+			headers: { authorization: `Bearer ${token}` },
+		});
+		if (!res.ok) {
+			throw new Error(`GCS LIST failed (${res.status}): ${await res.text()}`);
+		}
+		const json = (await res.json()) as {
+			items?: Array<{
+				name?: string;
+				size?: string;
+				updated?: string;
+				contentType?: string;
+				etag?: string;
+			}>;
+			prefixes?: string[];
+			nextPageToken?: string;
+		};
+		const objects: Array<DriveFile | DriveDirectory> = [];
+		for (const dir of json.prefixes ?? []) {
+			objects.push(new DriveDirectory(dir.replace(/\/$/, "")));
+		}
+		for (const item of json.items ?? []) {
+			const size = Number.parseInt(item.size ?? "0", 10);
+			const mimeType = item.contentType ?? "application/octet-stream";
+			objects.push(
+				new DriveFile(item.name ?? "", this, {
+					size,
+					contentLength: size,
+					mimeType,
+					contentType: mimeType,
+					lastModified: item.updated ? new Date(item.updated) : new Date(0),
+					etag: (item.etag ?? "").replace(/^(W\/)?"(.*)"$/, "$1$2"),
+					visibility: "private",
+				}),
+			);
+		}
+		return { paginationToken: json.nextPageToken, objects };
 	}
 
 	async *list(prefix: string): AsyncIterable<StorageEntry> {
@@ -346,7 +463,40 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	getSignedUrl(filePath: string, options?: SignedUrlOptions): string {
-		const expiresIn = options?.expiresIn ?? DEFAULT_EXPIRES_IN;
+		const responseParams: Array<[string, string]> = [];
+		if (options?.contentType) {
+			responseParams.push(["response-content-type", options.contentType]);
+		}
+		if (options?.contentDisposition) {
+			responseParams.push([
+				"response-content-disposition",
+				options.contentDisposition,
+			]);
+		}
+		return this.#presign("GET", filePath, options, responseParams);
+	}
+
+	/**
+	 * Presigned PUT URL for direct-to-GCS uploads. AdonisJS Drive parity.
+	 * Signed headers are `host` only, so the uploading client is free to
+	 * set its own `Content-Type`.
+	 */
+	getSignedUploadUrl(filePath: string, options?: SignedUrlOptions): string {
+		return this.#presign("PUT", filePath, options, []);
+	}
+
+	/**
+	 * Shared GOOG4-RSA-SHA256 query-parameter presigner for GET (read)
+	 * and PUT (upload) URLs. Signs `host` only; extra query params (e.g.
+	 * `response-content-*`) participate in the signature.
+	 */
+	#presign(
+		method: "GET" | "PUT",
+		filePath: string,
+		options: SignedUrlOptions | undefined,
+		extraQueryParams: Array<[string, string]>,
+	): string {
+		const expiresIn = parseExpiry(options?.expiresIn ?? DEFAULT_EXPIRES_IN);
 		assertValidExpiry(expiresIn);
 		const dateStamp = amzDateNow();
 		const shortDate = dateStamp.slice(0, 8);
@@ -359,15 +509,16 @@ export class GcsDriver implements StorageDriver {
 			["X-Goog-Date", dateStamp],
 			["X-Goog-Expires", String(expiresIn)],
 			["X-Goog-SignedHeaders", "host"],
+			...extraQueryParams,
 		];
 		const canonicalQs = queryParams
 			.slice()
 			.sort((a, b) => (a[0] < b[0] ? -1 : 1))
-			.map(([k, v]) => `${k}=${gcsStrictEncode(v)}`)
+			.map(([k, v]) => `${gcsStrictEncode(k)}=${gcsStrictEncode(v)}`)
 			.join("&");
 
 		const canonicalRequest = [
-			"GET",
+			method,
 			`/${this.#config.bucket}/${gcsEncodeKey(filePath)}`,
 			canonicalQs,
 			"host:storage.googleapis.com\n",

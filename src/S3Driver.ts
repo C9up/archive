@@ -11,14 +11,22 @@ import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { ArchiveError } from "./errors.js";
-import { assertValidExpiry, DEFAULT_EXPIRES_IN } from "./expiry.js";
+import {
+	assertValidExpiry,
+	DEFAULT_EXPIRES_IN,
+	parseExpiry,
+} from "./expiry.js";
+import { DriveDirectory, DriveFile } from "./objects.js";
 import type {
+	ListAllOptions,
+	ListAllResult,
 	Metadata,
 	PutStreamOptions,
 	SignedUrlOptions,
 	StorageDriver,
 	StorageEntry,
 	Visibility,
+	WriteOptions,
 } from "./StorageManager.js";
 
 /** AWS minimum for a non-final multipart part. */
@@ -80,10 +88,31 @@ export class S3Driver implements StorageDriver {
 		this.#endpoint = rawEndpoint.replace(/\/+$/, "");
 	}
 
-	async put(filePath: string, content: Buffer | string): Promise<void> {
+	async put(
+		filePath: string,
+		content: Buffer | string,
+		options?: WriteOptions,
+	): Promise<void> {
 		const body = typeof content === "string" ? Buffer.from(content) : content;
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
-		const headers = this.#signRequest({ method: "PUT", key: filePath, body });
+		// `x-amz-acl` is signed (extraHeaders) so the requested visibility
+		// actually takes effect. content-* metadata headers are kept
+		// UNSIGNED — undici may rewrite them for Buffer bodies, which
+		// would break a signed value.
+		const extraHeaders: Record<string, string> | undefined =
+			options?.visibility !== undefined
+				? {
+						"x-amz-acl":
+							options.visibility === "public" ? "public-read" : "private",
+					}
+				: undefined;
+		const signed = this.#signRequest({
+			method: "PUT",
+			key: filePath,
+			body,
+			extraHeaders,
+		});
+		const headers = { ...signed, ...unsignedMetadataHeaders(options) };
 
 		const res = await fetch(url, {
 			method: "PUT",
@@ -201,6 +230,23 @@ export class S3Driver implements StorageDriver {
 		return Buffer.from(arrayBuffer);
 	}
 
+	async getBytes(filePath: string): Promise<Uint8Array> {
+		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
+		const headers = this.#signRequest({ method: "GET", key: filePath });
+		const res = await fetch(url, { method: "GET", headers });
+		if (res.status === 404) {
+			throw new ArchiveError(
+				"ARCHIVE_NOT_FOUND",
+				`S3 object does not exist at path '${filePath}'`,
+				{
+					hint: "Confirm the bucket + key and that the object was put() first.",
+				},
+			);
+		}
+		if (!res.ok) throw new Error(`S3 GET failed (${res.status})`);
+		return new Uint8Array(await res.arrayBuffer());
+	}
+
 	async delete(filePath: string): Promise<boolean> {
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
 		const headers = this.#signRequest({ method: "DELETE", key: filePath });
@@ -284,7 +330,34 @@ export class S3Driver implements StorageDriver {
 		// Non-2xx on ACL (e.g. 403 on a bucket without permission) falls
 		// through to `private` — the safer default.
 
-		return { size, mimeType, lastModified, etag, visibility };
+		return {
+			size,
+			contentLength: size,
+			mimeType,
+			contentType: mimeType,
+			lastModified,
+			etag,
+			visibility,
+		};
+	}
+
+	async getVisibility(filePath: string): Promise<Visibility> {
+		const aclUrl = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}?acl`;
+		const aclHeaders = this.#signRequest({
+			method: "GET",
+			key: filePath,
+			queryParams: [["acl", ""]],
+		});
+		const aclRes = await fetch(aclUrl, { method: "GET", headers: aclHeaders });
+		if (aclRes.status === 404) {
+			throw new ArchiveError(
+				"ARCHIVE_NOT_FOUND",
+				`S3 object does not exist at path '${filePath}'`,
+				{ hint: "Confirm the bucket + key." },
+			);
+		}
+		if (aclRes.ok && isPublicAcl(await aclRes.text())) return "public";
+		return "private";
 	}
 
 	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
@@ -317,7 +390,42 @@ export class S3Driver implements StorageDriver {
 	 *   - Credentials and expiry live in query params, not headers.
 	 */
 	getSignedUrl(filePath: string, options?: SignedUrlOptions): string {
-		const expiresIn = options?.expiresIn ?? DEFAULT_EXPIRES_IN;
+		// `response-content-*` overrides are attached as extra query params;
+		// they participate in the signature via the canonical query string.
+		const responseParams: Array<[string, string]> = [];
+		if (options?.contentType) {
+			responseParams.push(["response-content-type", options.contentType]);
+		}
+		if (options?.contentDisposition) {
+			responseParams.push([
+				"response-content-disposition",
+				options.contentDisposition,
+			]);
+		}
+		return this.#presign("GET", filePath, options, responseParams);
+	}
+
+	/**
+	 * Presigned PUT URL for direct-to-S3 uploads. AdonisJS Drive parity.
+	 * A supplied `contentType` is baked into the signature as a
+	 * `Content-Type` header, so the client MUST send the same value.
+	 */
+	getSignedUploadUrl(filePath: string, options?: SignedUrlOptions): string {
+		return this.#presign("PUT", filePath, options, []);
+	}
+
+	/**
+	 * Shared SigV4 query-parameter presigner for GET (read) and PUT
+	 * (upload) URLs. Extracted so both flows share one canonicalisation
+	 * path — no copy-paste drift.
+	 */
+	#presign(
+		method: "GET" | "PUT",
+		filePath: string,
+		options: SignedUrlOptions | undefined,
+		extraQueryParams: Array<[string, string]>,
+	): string {
+		const expiresIn = parseExpiry(options?.expiresIn ?? DEFAULT_EXPIRES_IN);
 		assertValidExpiry(expiresIn);
 
 		const dateStamp = amzDateNow();
@@ -327,6 +435,11 @@ export class S3Driver implements StorageDriver {
 		const scope = `${shortDate}/${region}/${service}/aws4_request`;
 		const credential = `${this.#config.accessKeyId}/${scope}`;
 
+		// A PUT upload URL that pins Content-Type must sign that header.
+		const signContentType = method === "PUT" ? options?.contentType : undefined;
+		const signedHeaderNames = signContentType ? "content-type;host" : "host";
+		const host = new URL(this.#endpoint).host;
+
 		// Canonical query params — names MUST be URI-encoded and the
 		// whole string sorted by key before signing. Every `X-Amz-*`
 		// key is already safe, so we only URI-encode values.
@@ -335,21 +448,24 @@ export class S3Driver implements StorageDriver {
 			["X-Amz-Credential", credential],
 			["X-Amz-Date", dateStamp],
 			["X-Amz-Expires", String(expiresIn)],
-			["X-Amz-SignedHeaders", "host"],
+			["X-Amz-SignedHeaders", signedHeaderNames],
+			...extraQueryParams,
 		];
 		const canonicalQs = queryParams
 			.slice()
 			.sort((a, b) => (a[0] < b[0] ? -1 : 1))
-			.map(([k, v]) => `${k}=${s3StrictEncode(v)}`)
+			.map(([k, v]) => `${s3StrictEncode(k)}=${s3StrictEncode(v)}`)
 			.join("&");
 
-		const host = new URL(this.#endpoint).host;
+		const canonicalHeaders = signContentType
+			? `content-type:${signContentType}\nhost:${host}\n`
+			: `host:${host}\n`;
 		const canonicalRequest = [
-			"GET",
+			method,
 			`/${this.#config.bucket}/${s3EncodeKey(filePath)}`,
 			canonicalQs,
-			`host:${host}\n`,
-			"host",
+			canonicalHeaders,
+			signedHeaderNames,
 			"UNSIGNED-PAYLOAD",
 		].join("\n");
 
@@ -368,13 +484,20 @@ export class S3Driver implements StorageDriver {
 		return `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}?${canonicalQs}&X-Amz-Signature=${signature}`;
 	}
 
-	async copy(from: string, to: string): Promise<void> {
+	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(to)}`;
 		const copySource = `/${this.#config.bucket}/${s3EncodeKey(from)}`;
+		const extraHeaders: Record<string, string> = {
+			"x-amz-copy-source": copySource,
+		};
+		if (options?.visibility !== undefined) {
+			extraHeaders["x-amz-acl"] =
+				options.visibility === "public" ? "public-read" : "private";
+		}
 		const headers = this.#signRequest({
 			method: "PUT",
 			key: to,
-			extraHeaders: { "x-amz-copy-source": copySource },
+			extraHeaders,
 		});
 		const res = await fetch(url, { method: "PUT", headers });
 		if (!res.ok) {
@@ -397,11 +520,165 @@ export class S3Driver implements StorageDriver {
 		}
 	}
 
-	async move(from: string, to: string): Promise<void> {
+	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
 		// Non-atomic: copy then delete. An observer between the two
 		// steps sees both objects — documented in the interface JSDoc.
-		await this.copy(from, to);
+		await this.copy(from, to, options);
 		await this.delete(from);
+	}
+
+	async deleteAll(prefix: string): Promise<void> {
+		// List one page at a time and batch-delete (up to 1000 keys per
+		// DeleteObjects call) until the bucket is drained of the prefix.
+		let continuationToken: string | undefined;
+		do {
+			const qp: Array<[string, string]> = [
+				["list-type", "2"],
+				["prefix", prefix],
+			];
+			if (continuationToken) qp.push(["continuation-token", continuationToken]);
+			const canonicalQs = qp
+				.slice()
+				.sort((a, b) => (a[0] < b[0] ? -1 : 1))
+				.map(([k, v]) => `${k}=${s3StrictEncode(v)}`)
+				.join("&");
+			const listUrl = `${this.#endpoint}/${this.#config.bucket}?${canonicalQs}`;
+			const listHeaders = this.#signRequest({
+				method: "GET",
+				key: "",
+				queryParams: qp,
+			});
+			const listRes = await fetch(listUrl, {
+				method: "GET",
+				headers: listHeaders,
+			});
+			if (!listRes.ok) {
+				throw new Error(
+					`S3 LIST failed (${listRes.status}): ${await listRes.text()}`,
+				);
+			}
+			const xml = await listRes.text();
+			const keys: string[] = [];
+			const keyRe =
+				/<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<\/Contents>/g;
+			let m: RegExpExecArray | null = keyRe.exec(xml);
+			while (m !== null) {
+				if (m[1] !== undefined) keys.push(m[1]);
+				m = keyRe.exec(xml);
+			}
+			if (keys.length > 0) await this.#deleteObjects(keys);
+			const truncated = /<IsTruncated>true<\/IsTruncated>/i.test(xml);
+			const tokenMatch = xml.match(
+				/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/,
+			);
+			continuationToken = truncated && tokenMatch ? tokenMatch[1] : undefined;
+		} while (continuationToken);
+	}
+
+	/** Batch DeleteObjects (`POST ?delete`). S3 requires a `Content-MD5`. */
+	async #deleteObjects(keys: string[]): Promise<void> {
+		const body = Buffer.from(
+			`<Delete>${keys
+				.map((k) => `<Object><Key>${xmlEscape(k)}</Key></Object>`)
+				.join("")}<Quiet>true</Quiet></Delete>`,
+		);
+		const contentMd5 = createHash("md5").update(body).digest("base64");
+		const url = `${this.#endpoint}/${this.#config.bucket}?delete`;
+		const headers = this.#signRequest({
+			method: "POST",
+			key: "",
+			body,
+			queryParams: [["delete", ""]],
+			extraHeaders: { "content-md5": contentMd5 },
+		});
+		const res = await fetch(url, {
+			method: "POST",
+			headers,
+			body: body as BodyInit,
+		});
+		if (!res.ok) {
+			throw new Error(
+				`S3 DeleteObjects failed (${res.status}): ${await res.text()}`,
+			);
+		}
+	}
+
+	async listAll(
+		prefix: string,
+		options?: ListAllOptions,
+	): Promise<ListAllResult> {
+		const recursive = options?.recursive ?? false;
+		const normalizedPrefix =
+			prefix === "" || prefix === "/"
+				? ""
+				: !recursive && !prefix.endsWith("/")
+					? `${prefix}/`
+					: prefix;
+		const qp: Array<[string, string]> = [
+			["list-type", "2"],
+			["prefix", normalizedPrefix],
+		];
+		if (!recursive) qp.push(["delimiter", "/"]);
+		if (options?.paginationToken) {
+			qp.push(["continuation-token", options.paginationToken]);
+		}
+		const canonicalQs = qp
+			.slice()
+			.sort((a, b) => (a[0] < b[0] ? -1 : 1))
+			.map(([k, v]) => `${k}=${s3StrictEncode(v)}`)
+			.join("&");
+		const url = `${this.#endpoint}/${this.#config.bucket}?${canonicalQs}`;
+		const headers = this.#signRequest({
+			method: "GET",
+			key: "",
+			queryParams: qp,
+		});
+		const res = await fetch(url, { method: "GET", headers });
+		if (!res.ok) {
+			throw new Error(`S3 LIST failed (${res.status}): ${await res.text()}`);
+		}
+		const xml = await res.text();
+		const objects: Array<DriveFile | DriveDirectory> = [];
+		// Directories (CommonPrefixes) first, then files (Contents).
+		const prefixRe =
+			/<CommonPrefixes>[\s\S]*?<Prefix>([^<]+)<\/Prefix>[\s\S]*?<\/CommonPrefixes>/g;
+		let pm: RegExpExecArray | null = prefixRe.exec(xml);
+		while (pm !== null) {
+			if (pm[1] !== undefined) {
+				objects.push(new DriveDirectory(pm[1].replace(/\/$/, "")));
+			}
+			pm = prefixRe.exec(xml);
+		}
+		const blockRe = /<Contents>([\s\S]*?)<\/Contents>/g;
+		let bm: RegExpExecArray | null = blockRe.exec(xml);
+		while (bm !== null) {
+			const block = bm[1] ?? "";
+			const key = block.match(/<Key>([^<]+)<\/Key>/)?.[1] ?? "";
+			const sizeRaw = block.match(/<Size>([^<]+)<\/Size>/)?.[1] ?? "0";
+			const lm = block.match(/<LastModified>([^<]+)<\/LastModified>/)?.[1];
+			const size = Number.parseInt(sizeRaw, 10);
+			objects.push(
+				new DriveFile(key, this, {
+					size,
+					contentLength: size,
+					mimeType: "application/octet-stream",
+					contentType: "application/octet-stream",
+					lastModified: lm ? new Date(lm) : new Date(0),
+					etag:
+						block.match(/<ETag>([^<]+)<\/ETag>/)?.[1]?.replace(/"/g, "") ?? "",
+					visibility: "private",
+				}),
+			);
+			bm = blockRe.exec(xml);
+		}
+		const truncated = /<IsTruncated>true<\/IsTruncated>/i.test(xml);
+		const tokenMatch = xml.match(
+			/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/,
+		);
+		return {
+			paginationToken: truncated && tokenMatch ? tokenMatch[1] : undefined,
+			objects,
+		};
 	}
 
 	async *list(prefix: string): AsyncIterable<StorageEntry> {
@@ -693,6 +970,31 @@ export class S3Driver implements StorageDriver {
 /** Returns the current instant in AWS basic-ISO8601 form: `YYYYMMDDTHHMMSSZ`. */
 function amzDateNow(): string {
 	return `${new Date().toISOString().replace(/[-:]/g, "").split(".")[0]}Z`;
+}
+
+/**
+ * Build the UNSIGNED content-metadata headers from {@link WriteOptions}.
+ * Kept unsigned because undici may rewrite them for Buffer bodies, which
+ * would invalidate a signed value (`x-amz-acl` is signed separately).
+ */
+function unsignedMetadataHeaders(
+	options: WriteOptions | undefined,
+): Record<string, string> {
+	const headers: Record<string, string> = {};
+	if (options?.contentType) headers["content-type"] = options.contentType;
+	if (options?.cacheControl) headers["cache-control"] = options.cacheControl;
+	if (options?.contentDisposition) {
+		headers["content-disposition"] = options.contentDisposition;
+	}
+	return headers;
+}
+
+/** Minimal XML text escaping for object keys inside a DeleteObjects body. */
+function xmlEscape(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
 }
 
 /**

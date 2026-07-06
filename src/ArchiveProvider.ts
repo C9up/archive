@@ -21,6 +21,7 @@
  *   import storage from '@c9up/archive/services/main'
  *   await storage.put('uploads/avatar.png', buffer)
  */
+import { type DriveConfig, DriveManager } from "./DriveManager.js";
 import { ArchiveError } from "./errors.js";
 
 import { type GcsConfig, GcsDriver } from "./GcsDriver.js";
@@ -44,6 +45,12 @@ export interface ArchiveAppContext {
 	config: ArchiveConfigStore;
 }
 
+/**
+ * Legacy single-disk config shape (pre-parity). Still accepted: the
+ * provider wraps it in a one-service DriveManager under the disk name
+ * `default`. New apps should use the AdonisJS-parity {@link DriveConfig}
+ * (`{ default, services, fakes }`) built with `defineConfig` + `services.*`.
+ */
 export interface ArchiveConfig {
 	driver: "local" | "s3" | "gcs";
 	local?: { root: string; signingSecret?: string };
@@ -60,24 +67,29 @@ export default class ArchiveProvider {
 	constructor(protected app: ArchiveAppContext) {}
 
 	register(): void {
-		this.app.container.singleton(StorageManager, () => {
-			const config =
-				this.app.config.get<ArchiveConfig>("archive") ?? DEFAULT_CONFIG;
-			const driver: StorageDriver = buildDriver(config);
-			return new StorageManager(driver);
+		this.app.container.singleton(DriveManager, () => {
+			const raw = this.app.config.get<ArchiveConfig | DriveConfig>("archive");
+			return new DriveManager(resolveDriveConfig(raw));
 		});
+		// Backward-compatible bindings — the default disk is what apps
+		// previously resolved via `StorageManager` / the `storage` token.
+		this.app.container.singleton(StorageManager, () =>
+			this.app.container.resolve<DriveManager>(DriveManager).use(),
+		);
 		this.app.container.singleton("storage", () =>
 			this.app.container.resolve<StorageManager>(StorageManager),
+		);
+		this.app.container.singleton("drive", () =>
+			this.app.container.resolve<DriveManager>(DriveManager),
 		);
 	}
 
 	async boot(): Promise<void> {
-		// Skip eager validation when archive is unconfigured: an app that
+		// Skip eager resolution when archive is unconfigured: an app that
 		// registers this provider but never uses storage should not trigger
 		// LocalDriver's mkdirSync of './storage' at boot (breaks on
-		// read-only rootfs). Explicit (object-shaped) configs still fail
-		// fast.
-		const archive = this.app.config.get<ArchiveConfig>("archive");
+		// read-only rootfs). Explicit (object-shaped) configs still resolve.
+		const archive = this.app.config.get<ArchiveConfig | DriveConfig>("archive");
 		if (
 			archive === undefined ||
 			archive === null ||
@@ -92,6 +104,34 @@ export default class ArchiveProvider {
 	async start(): Promise<void> {}
 	async ready(): Promise<void> {}
 	async shutdown(): Promise<void> {}
+}
+
+/** Narrow an unknown config value to the multi-disk {@link DriveConfig} shape. */
+function isDriveConfig(config: unknown): config is DriveConfig {
+	return (
+		typeof config === "object" &&
+		config !== null &&
+		"services" in config &&
+		typeof (config as { services: unknown }).services === "object" &&
+		(config as { services: unknown }).services !== null
+	);
+}
+
+/**
+ * Reconcile whatever shape the app configured into a {@link DriveConfig}:
+ *   - `{ default, services, fakes }` → used as-is (parity path).
+ *   - legacy `{ driver, local, s3, gcs }` → wrapped as one `default` disk.
+ *   - unset → the built-in local default.
+ */
+function resolveDriveConfig(
+	raw: ArchiveConfig | DriveConfig | undefined,
+): DriveConfig {
+	if (isDriveConfig(raw)) return raw;
+	const legacy: ArchiveConfig = raw ?? DEFAULT_CONFIG;
+	return {
+		default: "default",
+		services: { default: () => buildDriver(legacy) },
+	};
 }
 
 function buildDriver(config: ArchiveConfig): StorageDriver {
