@@ -1,6 +1,6 @@
 {
   "name": "@c9up/archive",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Archive — File storage abstraction for the Ream framework (Local + S3-compatible drivers)",
   "license": "MIT",
   "type": "module",

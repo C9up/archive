@@ -15,11 +15,11 @@ class StubContainer {
 	singleton(token: unknown, factory: () => unknown): void {
 		this.#factories.set(token, factory);
 	}
-	resolve<T = unknown>(token: unknown): T {
+	async resolve<T = unknown>(token: unknown): Promise<T> {
 		if (this.#cache.has(token)) return this.#cache.get(token) as T;
 		const factory = this.#factories.get(token);
 		if (!factory) throw new Error(`no binding for ${String(token)}`);
-		const value = factory();
+		const value = await factory();
 		this.#cache.set(token, value);
 		return value as T;
 	}
@@ -44,14 +44,14 @@ function buildApp(initial: Record<string, unknown> = {}): ArchiveAppContext {
 }
 
 describe("ArchiveProvider", () => {
-	it("binds StorageManager under both class and 'storage' string token", () => {
+	it("binds StorageManager under both class and 'storage' string token", async () => {
 		const app = buildApp({
 			archive: { driver: "local", local: { root: "./tmp-storage" } },
 		});
 		new ArchiveProvider(app).register();
 
-		const byClass = app.container.resolve<StorageManager>(StorageManager);
-		const byAlias = app.container.resolve<StorageManager>("storage");
+		const byClass = await app.container.resolve<StorageManager>(StorageManager);
+		const byAlias = await app.container.resolve<StorageManager>("storage");
 		expect(byClass).toBeInstanceOf(StorageManager);
 		expect(byAlias).toBe(byClass);
 	});
@@ -66,40 +66,44 @@ describe("ArchiveProvider", () => {
 			},
 		});
 		new ArchiveProvider(app).register();
-		const manager = app.container.resolve<StorageManager>(StorageManager);
+		const manager = await app.container.resolve<StorageManager>(StorageManager);
 		// Pre-fix: signingSecret never reached the LocalDriver → ARCHIVE_SIGNING_DISABLED.
 		const url = await manager.getSignedUrl("foo.txt");
 		expect(typeof url).toBe("string");
 		expect(url).toContain("foo.txt");
 	});
 
-	it("falls back to DEFAULT_CONFIG when app.config.get returns undefined", () => {
+	it("falls back to DEFAULT_CONFIG when app.config.get returns undefined", async () => {
 		const app = buildApp({});
 		new ArchiveProvider(app).register();
-		expect(() =>
+		await expect(
 			app.container.resolve<StorageManager>(StorageManager),
-		).not.toThrow();
+		).resolves.toBeInstanceOf(StorageManager);
 	});
 
-	it("throws ARCHIVE_CONFIG_MISSING when driver is 's3' but config.s3 is absent", () => {
+	it("throws ARCHIVE_CONFIG_MISSING when driver is 's3' but config.s3 is absent", async () => {
 		const app = buildApp({ archive: { driver: "s3" } });
 		new ArchiveProvider(app).register();
 
-		expect(() => app.container.resolve<StorageManager>(StorageManager)).toThrow(
+		await expect(
+			app.container.resolve<StorageManager>(StorageManager),
+		).rejects.toThrow(
 			expect.objectContaining({ code: "ARCHIVE_CONFIG_MISSING" }),
 		);
 	});
 
-	it("throws ARCHIVE_INVALID_DRIVER on an unknown driver string", () => {
+	it("throws ARCHIVE_INVALID_DRIVER on an unknown driver string", async () => {
 		const app = buildApp({ archive: { driver: "locla" } });
 		new ArchiveProvider(app).register();
 
-		expect(() => app.container.resolve<StorageManager>(StorageManager)).toThrow(
+		await expect(
+			app.container.resolve<StorageManager>(StorageManager),
+		).rejects.toThrow(
 			expect.objectContaining({ code: "ARCHIVE_INVALID_DRIVER" }),
 		);
 	});
 
-	it("builds an S3Driver-backed manager when driver is 's3' with valid s3 config", () => {
+	it("builds an S3Driver-backed manager when driver is 's3' with valid s3 config", async () => {
 		const app = buildApp({
 			archive: {
 				driver: "s3",
@@ -113,19 +117,19 @@ describe("ArchiveProvider", () => {
 		});
 		new ArchiveProvider(app).register();
 
-		const manager = app.container.resolve<StorageManager>(StorageManager);
+		const manager = await app.container.resolve<StorageManager>(StorageManager);
 		expect(manager).toBeInstanceOf(StorageManager);
 		// The manager wraps an S3Driver — check via publicUrl() shape.
 		expect(manager.publicUrl("x/y.png")).toContain("/b/x/y.png");
 	});
 
-	it("builds a LocalDriver-backed manager when driver is 'local'", () => {
+	it("builds a LocalDriver-backed manager when driver is 'local'", async () => {
 		const app = buildApp({
 			archive: { driver: "local", local: { root: "./tmp-archive" } },
 		});
 		new ArchiveProvider(app).register();
 
-		const manager = app.container.resolve<StorageManager>(StorageManager);
+		const manager = await app.container.resolve<StorageManager>(StorageManager);
 		expect(manager.publicUrl("file.png")).toBe("/storage/file.png");
 		// Sanity: both driver classes are reachable from the barrel.
 		expect(LocalDriver).toBeDefined();
@@ -159,9 +163,9 @@ describe("ArchiveProvider", () => {
 
 		await expect(provider.boot()).resolves.toBeUndefined();
 		// Lazy resolution still falls back to DEFAULT_CONFIG when actually used.
-		expect(() =>
+		await expect(
 			app.container.resolve<StorageManager>(StorageManager),
-		).not.toThrow();
+		).resolves.toBeInstanceOf(StorageManager);
 	});
 
 	it("boot() eagerly validates an explicit local config", async () => {

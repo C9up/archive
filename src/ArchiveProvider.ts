@@ -35,7 +35,7 @@ import { setStorage } from "./services/main.js";
 
 interface ArchiveContainer {
 	singleton(token: unknown, factory: () => unknown): void;
-	resolve<T = unknown>(token: unknown): T;
+	resolve<T = unknown>(token: unknown): Promise<T>;
 }
 interface ArchiveConfigStore {
 	get<T = unknown>(key: string): T | undefined;
@@ -73,13 +73,13 @@ export default class ArchiveProvider {
 		});
 		// Backward-compatible bindings — the default disk is what apps
 		// previously resolved via `StorageManager` / the `storage` token.
-		this.app.container.singleton(StorageManager, () =>
-			this.app.container.resolve<DriveManager>(DriveManager).use(),
+		this.app.container.singleton(StorageManager, async () =>
+			(await this.app.container.resolve<DriveManager>(DriveManager)).use(),
 		);
-		this.app.container.singleton("storage", () =>
+		this.app.container.singleton("storage", async () =>
 			this.app.container.resolve<StorageManager>(StorageManager),
 		);
-		this.app.container.singleton("drive", () =>
+		this.app.container.singleton("drive", async () =>
 			this.app.container.resolve<DriveManager>(DriveManager),
 		);
 	}
@@ -97,7 +97,8 @@ export default class ArchiveProvider {
 		) {
 			return;
 		}
-		const manager = this.app.container.resolve<StorageManager>(StorageManager);
+		const manager =
+			await this.app.container.resolve<StorageManager>(StorageManager);
 		setStorage(manager);
 	}
 
