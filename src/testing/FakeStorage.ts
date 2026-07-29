@@ -16,6 +16,7 @@
 import { AssertionError } from "node:assert";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
+import type { Plugin } from "@c9up/helix";
 import { ArchiveError } from "../errors.js";
 import {
 	assertValidExpiry,
@@ -548,4 +549,44 @@ function describeStorageCaptured(
 function extFromPath(filePath: string): string {
 	const idx = filePath.lastIndexOf(".");
 	return idx < 0 ? "" : filePath.slice(idx).toLowerCase();
+}
+
+/** A drive that can enter/exit fake mode — structurally the `DriveManager`. */
+export interface FakeableDrive {
+	/** Swap a disk for an in-memory fake and return it. */
+	fake(service?: string): FakeStorageManager;
+	/** Restore the real disk. */
+	restore(service?: string): void;
+}
+
+/**
+ * `driveFake()` — a helix plugin (AdonisJS `drive.fake()` parity) that injects
+ * an in-memory {@link FakeStorageManager} on the test context as `ctx.drive`,
+ * PER TEST, auto-restoring the real disk afterwards via `ctx.cleanup`:
+ *
+ *   await configure({ plugins: [driveFake(drive)] });
+ *   test("stores the avatar", async ({ drive }) => {
+ *     await uploadAvatar();
+ *     drive.assertExists("avatars/1.png");
+ *   });
+ *
+ * Uses the manager's own `fake()`/`restore()` (the Adonis pattern); the
+ * getter+cleanup wiring adds the per-test lifecycle.
+ */
+export function driveFake(drive: FakeableDrive): Plugin {
+	return (api) => {
+		api.context.getter("drive", (ctx) => {
+			const fake = drive.fake();
+			ctx.cleanup(() => drive.restore());
+			return fake;
+		});
+	};
+}
+
+// Typing side of the plugin — importing `@c9up/archive/testing` augments the
+// helix test context with `drive` (the Japa pattern).
+declare module "@c9up/helix" {
+	interface TestContext {
+		drive: FakeStorageManager;
+	}
 }
