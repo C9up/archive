@@ -6,16 +6,23 @@
 
 import { createAssert, type TestContext, type TestInstance } from "@c9up/helix";
 import { describe, expect, it } from "vitest";
-import {
-	driveFake,
-	FakeStorageManager,
-} from "../../src/testing/FakeStorage.js";
+import { driveFake, FakeStorageManager } from "../../src/testing/FakeStorage.js";
 
 const stubInstance: TestInstance = {
 	title: "t",
 	fullName: "t",
-	options: { timeout: 0, retries: 0, tags: [] },
+	options: {
+		title: "t",
+		timeout: 0,
+		retries: 0,
+		tags: [],
+		isTodo: false,
+		isFailing: false,
+		meta: {},
+	},
 	isPinned: false,
+	resetTimeout: () => {},
+	cleanup: () => {},
 };
 
 describe("helix plugin > driveFake()", () => {
@@ -37,7 +44,7 @@ describe("helix plugin > driveFake()", () => {
 		await driveFake(drive)({
 			context: {
 				macro() {},
-				getter(name, fn) {
+				getter(name: string, fn: (ctx: TestContext) => unknown) {
 					if (name === "drive") getter = fn;
 				},
 			},
@@ -45,7 +52,11 @@ describe("helix plugin > driveFake()", () => {
 		expect(getter).toBeDefined();
 
 		const cleanups: Array<() => void | Promise<void>> = [];
+		// `drive` is part of the augmented context, so a full TestContext carries
+		// one. The getter never reads it — it produces the value that replaces
+		// it — but the stub has to be a whole context to be handed to it.
 		const ctx: TestContext = {
+			drive: new FakeStorageManager(),
 			cleanup: (fn) => {
 				cleanups.push(fn);
 			},

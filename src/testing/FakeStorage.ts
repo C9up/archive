@@ -16,7 +16,7 @@
 import { AssertionError } from "node:assert";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
-import type { Plugin } from "@c9up/helix";
+import type { Plugin, PluginApi, TestContext } from "@c9up/helix";
 import { ArchiveError } from "../errors.js";
 import {
 	assertValidExpiry,
@@ -573,14 +573,24 @@ export interface FakeableDrive {
  * Uses the manager's own `fake()`/`restore()` (the Adonis pattern); the
  * getter+cleanup wiring adds the per-test lifecycle.
  */
-export function driveFake(drive: FakeableDrive): Plugin {
-	return (api) => {
-		api.context.getter("drive", (ctx) => {
+/** The slice of helix's `PluginApi` this plugin touches: the context getter. */
+export type DriveHost = Pick<PluginApi, "context">;
+
+/** The slice of the test context the getter reads: a cleanup hook. */
+export type DriveContext = Pick<TestContext, "cleanup">;
+
+export function driveFake(drive: FakeableDrive) {
+	// A wider parameter than `PluginApi` stays assignable to `Plugin`, so the
+	// plugin declares exactly what it touches and a caller can drive it with
+	// nothing more than that.
+	const plugin = (api: DriveHost): void => {
+		api.context.getter("drive", (ctx: DriveContext) => {
 			const fake = drive.fake();
 			ctx.cleanup(() => drive.restore());
 			return fake;
 		});
 	};
+	return plugin satisfies Plugin;
 }
 
 // Typing side of the plugin — importing `@c9up/archive/testing` augments the
