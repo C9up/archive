@@ -844,11 +844,24 @@ export class StorageManager {
 		destination: string,
 		options?: WriteOptions,
 	): Promise<void> {
-		await this.#driver.putStream(
-			destination,
-			fs.createReadStream(localPath(source)),
-			options,
-		);
+		const stream = fs.createReadStream(localPath(source));
+		try {
+			await this.#driver.putStream(destination, stream, options);
+		} catch (error) {
+			// The driver can reject BEFORE reading a byte — a destination outside
+			// the disk is rejected up front. The stream is then never consumed:
+			// it holds its file descriptor open, and later emits `error` with no
+			// listener attached, which crashes the process rather than surfacing
+			// as this rejection.
+			//
+			// The listener goes on BEFORE destroy: the open() is already in flight
+			// and will report ENOENT/EACCES on a stream nobody is reading. We are
+			// discarding it, and the driver's rejection below is the error that
+			// actually explains the failure.
+			stream.on("error", () => {});
+			stream.destroy();
+			throw error;
+		}
 	}
 
 	/**
