@@ -6,7 +6,10 @@
 
 import { createAssert, type TestContext, type TestInstance } from "@c9up/helix";
 import { describe, expect, it } from "vitest";
-import { driveFake, FakeStorageManager } from "../../src/testing/FakeStorage.js";
+import {
+	driveFake,
+	FakeStorageManager,
+} from "../../src/testing/FakeStorage.js";
 
 const stubInstance: TestInstance = {
 	title: "t",

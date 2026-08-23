@@ -62,9 +62,42 @@ export interface S3Config {
 	accessKeyId: string;
 	secretAccessKey: string;
 	publicUrl?: string;
+	/**
+	 * How long one request to the provider may take, in ms. Default 30 000.
+	 *
+	 * Without a bound a hung connection never settles: the handler awaiting it
+	 * waits forever, and enough of them stop the server from serving. Set 0 to
+	 * disable, which only makes sense behind an outer timeout.
+	 */
+	requestTimeoutMs?: number;
 }
 
 export class S3Driver implements StorageDriver {
+	/**
+	 * One request to the provider, bounded by {@link S3Config.requestTimeoutMs}.
+	 *
+	 * `AbortSignal.timeout` aborts the socket, so a hung connection surfaces as
+	 * an error the caller can retry instead of a promise that never settles.
+	 */
+	async #fetch(url: string, init: RequestInit = {}): Promise<Response> {
+		const ms = this.#config.requestTimeoutMs ?? 30_000;
+		if (ms <= 0) return fetch(url, init);
+		try {
+			return await fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
+		} catch (err) {
+			if (err instanceof Error && err.name === "TimeoutError") {
+				throw new ArchiveError(
+					"ARCHIVE_REQUEST_TIMEOUT",
+					`The storage provider did not answer within ${ms}ms.`,
+					{
+						hint: "Raise `requestTimeoutMs` for large objects, or check connectivity to the bucket.",
+					},
+				);
+			}
+			throw err;
+		}
+	}
+
 	#config: S3Config;
 	#endpoint: string;
 
@@ -114,7 +147,7 @@ export class S3Driver implements StorageDriver {
 		});
 		const headers = { ...signed, ...unsignedMetadataHeaders(options) };
 
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "PUT",
 			headers,
 			body: body as BodyInit,
@@ -143,7 +176,7 @@ export class S3Driver implements StorageDriver {
 			const headers: Record<string, string> = contentType
 				? { ...signed, "content-type": contentType }
 				: signed;
-			const res = await fetch(url, {
+			const res = await this.#fetch(url, {
 				method: "PUT",
 				headers,
 				body: body as BodyInit,
@@ -196,7 +229,7 @@ export class S3Driver implements StorageDriver {
 	async getStream(filePath: string): Promise<NodeJS.ReadableStream> {
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
 		const headers = this.#signRequest({ method: "GET", key: filePath });
-		const res = await fetch(url, { method: "GET", headers });
+		const res = await this.#fetch(url, { method: "GET", headers });
 		if (res.status === 404) {
 			throw new ArchiveError(
 				"ARCHIVE_NOT_FOUND",
@@ -212,7 +245,7 @@ export class S3Driver implements StorageDriver {
 			return Readable.from(Buffer.alloc(0));
 		}
 		// Node's `Readable.fromWeb` expects the `node:stream/web` variant,
-		// while `fetch().body` gives the lib.dom variant. Runtime shape is
+		// while `this.#fetch().body` gives the lib.dom variant. Runtime shape is
 		// identical — the difference is only in TS lib typings. A single
 		// cast to the node-side type is enough (no `unknown` pivot).
 		return Readable.fromWeb(res.body as NodeReadableStream<Uint8Array>);
@@ -222,7 +255,7 @@ export class S3Driver implements StorageDriver {
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
 		const headers = this.#signRequest({ method: "GET", key: filePath });
 
-		const res = await fetch(url, { method: "GET", headers });
+		const res = await this.#fetch(url, { method: "GET", headers });
 		if (res.status === 404) return null;
 		if (!res.ok) throw new Error(`S3 GET failed (${res.status})`);
 
@@ -233,7 +266,7 @@ export class S3Driver implements StorageDriver {
 	async getBytes(filePath: string): Promise<Uint8Array> {
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
 		const headers = this.#signRequest({ method: "GET", key: filePath });
-		const res = await fetch(url, { method: "GET", headers });
+		const res = await this.#fetch(url, { method: "GET", headers });
 		if (res.status === 404) {
 			throw new ArchiveError(
 				"ARCHIVE_NOT_FOUND",
@@ -251,7 +284,7 @@ export class S3Driver implements StorageDriver {
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
 		const headers = this.#signRequest({ method: "DELETE", key: filePath });
 
-		const res = await fetch(url, { method: "DELETE", headers });
+		const res = await this.#fetch(url, { method: "DELETE", headers });
 		return res.ok || res.status === 204;
 	}
 
@@ -259,7 +292,7 @@ export class S3Driver implements StorageDriver {
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
 		const headers = this.#signRequest({ method: "HEAD", key: filePath });
 
-		const res = await fetch(url, { method: "HEAD", headers });
+		const res = await this.#fetch(url, { method: "HEAD", headers });
 		return res.ok;
 	}
 
@@ -282,7 +315,7 @@ export class S3Driver implements StorageDriver {
 		// HEAD for size / mime / lastModified / etag.
 		const headUrl = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
 		const headHeaders = this.#signRequest({ method: "HEAD", key: filePath });
-		const headRes = await fetch(headUrl, {
+		const headRes = await this.#fetch(headUrl, {
 			method: "HEAD",
 			headers: headHeaders,
 		});
@@ -321,7 +354,10 @@ export class S3Driver implements StorageDriver {
 			key: filePath,
 			queryParams: [["acl", ""]],
 		});
-		const aclRes = await fetch(aclUrl, { method: "GET", headers: aclHeaders });
+		const aclRes = await this.#fetch(aclUrl, {
+			method: "GET",
+			headers: aclHeaders,
+		});
 		let visibility: Visibility = "private";
 		if (aclRes.ok) {
 			const xml = await aclRes.text();
@@ -348,7 +384,10 @@ export class S3Driver implements StorageDriver {
 			key: filePath,
 			queryParams: [["acl", ""]],
 		});
-		const aclRes = await fetch(aclUrl, { method: "GET", headers: aclHeaders });
+		const aclRes = await this.#fetch(aclUrl, {
+			method: "GET",
+			headers: aclHeaders,
+		});
 		if (aclRes.status === 404) {
 			throw new ArchiveError(
 				"ARCHIVE_NOT_FOUND",
@@ -369,7 +408,7 @@ export class S3Driver implements StorageDriver {
 			queryParams: [["acl", ""]],
 			extraHeaders: { "x-amz-acl": cannedAcl },
 		});
-		const res = await fetch(url, { method: "PUT", headers });
+		const res = await this.#fetch(url, { method: "PUT", headers });
 		if (!res.ok) {
 			throw new Error(`S3 PUT failed (${res.status}): ${await res.text()}`);
 		}
@@ -499,7 +538,7 @@ export class S3Driver implements StorageDriver {
 			key: to,
 			extraHeaders,
 		});
-		const res = await fetch(url, { method: "PUT", headers });
+		const res = await this.#fetch(url, { method: "PUT", headers });
 		if (!res.ok) {
 			const body = await res.text();
 			if (/\bNoSuchKey\b/.test(body) || res.status === 404) {
@@ -548,7 +587,7 @@ export class S3Driver implements StorageDriver {
 				key: "",
 				queryParams: qp,
 			});
-			const listRes = await fetch(listUrl, {
+			const listRes = await this.#fetch(listUrl, {
 				method: "GET",
 				headers: listHeaders,
 			});
@@ -591,7 +630,7 @@ export class S3Driver implements StorageDriver {
 			queryParams: [["delete", ""]],
 			extraHeaders: { "content-md5": contentMd5 },
 		});
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "POST",
 			headers,
 			body: body as BodyInit,
@@ -633,7 +672,7 @@ export class S3Driver implements StorageDriver {
 			key: "",
 			queryParams: qp,
 		});
-		const res = await fetch(url, { method: "GET", headers });
+		const res = await this.#fetch(url, { method: "GET", headers });
 		if (!res.ok) {
 			throw new Error(`S3 LIST failed (${res.status}): ${await res.text()}`);
 		}
@@ -700,7 +739,7 @@ export class S3Driver implements StorageDriver {
 				key: "",
 				queryParams: qp,
 			});
-			const res = await fetch(url, { method: "GET", headers });
+			const res = await this.#fetch(url, { method: "GET", headers });
 			if (!res.ok) {
 				throw new Error(`S3 LIST failed (${res.status}): ${await res.text()}`);
 			}
@@ -830,7 +869,7 @@ export class S3Driver implements StorageDriver {
 		const headers: Record<string, string> = contentType
 			? { ...signed, "content-type": contentType }
 			: signed;
-		const res = await fetch(url, { method: "POST", headers });
+		const res = await this.#fetch(url, { method: "POST", headers });
 		if (!res.ok) {
 			throw new Error(
 				`S3 multipart initiate failed (${res.status}): ${await res.text()}`,
@@ -873,7 +912,7 @@ export class S3Driver implements StorageDriver {
 		const headers: Record<string, string> = contentType
 			? { ...signed, "content-type": contentType }
 			: signed;
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "PUT",
 			headers,
 			body: body as BodyInit,
@@ -915,7 +954,7 @@ export class S3Driver implements StorageDriver {
 			body: xmlBody,
 			queryParams: [["uploadId", uploadId]],
 		});
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "POST",
 			headers: signed,
 			body: xmlBody as BodyInit,
@@ -949,7 +988,7 @@ export class S3Driver implements StorageDriver {
 			key: filePath,
 			queryParams: [["uploadId", uploadId]],
 		});
-		await fetch(url, { method: "DELETE", headers });
+		await this.#fetch(url, { method: "DELETE", headers });
 	}
 
 	/**

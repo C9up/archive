@@ -25,6 +25,7 @@ export {
 	GcsDriver,
 	type GcsServiceAccount,
 } from "./GcsDriver.js";
+export type { FileSnapshot } from "./objects.js";
 export { DriveDirectory, DriveFile } from "./objects.js";
 export { type S3Config, S3Driver } from "./S3Driver.js";
 export {

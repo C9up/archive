@@ -77,7 +77,14 @@ export interface GcsConfig {
 	bucket: string;
 	serviceAccount: GcsServiceAccount;
 	/** Optional CDN prefix for public URLs (e.g. `https://cdn.example.com`). */
-	publicUrl?: string;
+	publicUrl?: string /**
+	 * How long one request to the provider may take, in ms. Default 30 000.
+	 *
+	 * Without a bound a hung connection never settles: the handler awaiting it
+	 * waits forever, and enough of them stop the server from serving. Set 0 to
+	 * disable, which only makes sense behind an outer timeout.
+	 */;
+	requestTimeoutMs?: number;
 }
 
 const GCS_API_ROOT = "https://storage.googleapis.com";
@@ -87,6 +94,31 @@ const GCS_OAUTH_URL = "https://oauth2.googleapis.com/token";
 const GCS_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write";
 
 export class GcsDriver implements StorageDriver {
+	/**
+	 * One request to the provider, bounded by {@link GcsConfig.requestTimeoutMs}.
+	 *
+	 * `AbortSignal.timeout` aborts the socket, so a hung connection surfaces as
+	 * an error the caller can retry instead of a promise that never settles.
+	 */
+	async #fetch(url: string, init: RequestInit = {}): Promise<Response> {
+		const ms = this.#config.requestTimeoutMs ?? 30_000;
+		if (ms <= 0) return fetch(url, init);
+		try {
+			return await fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
+		} catch (err) {
+			if (err instanceof Error && err.name === "TimeoutError") {
+				throw new ArchiveError(
+					"ARCHIVE_REQUEST_TIMEOUT",
+					`The storage provider did not answer within ${ms}ms.`,
+					{
+						hint: "Raise `requestTimeoutMs` for large objects, or check connectivity to the bucket.",
+					},
+				);
+			}
+			throw err;
+		}
+	}
+
 	#config: GcsConfig;
 	#cachedToken: { value: string; expiresAt: number } | null = null;
 
@@ -124,7 +156,7 @@ export class GcsDriver implements StorageDriver {
 		if (options?.contentDisposition) {
 			headers["content-disposition"] = options.contentDisposition;
 		}
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "POST",
 			headers,
 			body: body as BodyInit,
@@ -167,7 +199,7 @@ export class GcsDriver implements StorageDriver {
 		const mime =
 			options?.contentType ??
 			(inferMimeType(extFromPath(filePath)) || "application/octet-stream");
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "POST",
 			headers: {
 				authorization: `Bearer ${token}`,
@@ -183,7 +215,7 @@ export class GcsDriver implements StorageDriver {
 	async get(filePath: string): Promise<Buffer | null> {
 		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}?alt=media`;
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
 		});
@@ -195,7 +227,7 @@ export class GcsDriver implements StorageDriver {
 	async getStream(filePath: string): Promise<NodeJS.ReadableStream> {
 		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}?alt=media`;
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
 		});
@@ -216,7 +248,7 @@ export class GcsDriver implements StorageDriver {
 	async delete(filePath: string): Promise<boolean> {
 		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}`;
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "DELETE",
 			headers: { authorization: `Bearer ${token}` },
 		});
@@ -227,7 +259,7 @@ export class GcsDriver implements StorageDriver {
 	async exists(filePath: string): Promise<boolean> {
 		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}`;
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
 		});
@@ -257,7 +289,7 @@ export class GcsDriver implements StorageDriver {
 	async getMetadata(filePath: string): Promise<Metadata> {
 		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}`;
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
 		});
@@ -308,7 +340,7 @@ export class GcsDriver implements StorageDriver {
 		const token = await this.#getAccessToken();
 		const base = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}/acl`;
 		if (visibility === "public") {
-			const res = await fetch(base, {
+			const res = await this.#fetch(base, {
 				method: "POST",
 				headers: {
 					authorization: `Bearer ${token}`,
@@ -322,7 +354,7 @@ export class GcsDriver implements StorageDriver {
 				);
 			}
 		} else {
-			const res = await fetch(`${base}/allUsers`, {
+			const res = await this.#fetch(`${base}/allUsers`, {
 				method: "DELETE",
 				headers: { authorization: `Bearer ${token}` },
 			});
@@ -338,7 +370,7 @@ export class GcsDriver implements StorageDriver {
 	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(from)}/copyTo/b/${this.#config.bucket}/o/${gcsEncodeKey(to)}`;
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "POST",
 			headers: { authorization: `Bearer ${token}` },
 		});
@@ -393,7 +425,7 @@ export class GcsDriver implements StorageDriver {
 		}
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o?${params.toString()}`;
 		const token = await this.#getAccessToken();
-		const res = await fetch(url, {
+		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
 		});
@@ -440,7 +472,7 @@ export class GcsDriver implements StorageDriver {
 			if (pageToken) params.set("pageToken", pageToken);
 			const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o?${params.toString()}`;
 			const token = await this.#getAccessToken();
-			const res = await fetch(url, {
+			const res = await this.#fetch(url, {
 				method: "GET",
 				headers: { authorization: `Bearer ${token}` },
 			});
@@ -580,7 +612,7 @@ export class GcsDriver implements StorageDriver {
 			grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
 			assertion: jwt,
 		}).toString();
-		const res = await fetch(GCS_OAUTH_URL, {
+		const res = await this.#fetch(GCS_OAUTH_URL, {
 			method: "POST",
 			headers: { "content-type": "application/x-www-form-urlencoded" },
 			body,

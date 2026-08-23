@@ -37,6 +37,17 @@ export class DriveDirectory {
  * `DriveFile` but built on the in-package {@link StorageDriver} contract
  * (no router coupling — the legitimate ream divergence).
  */
+/** A file described without its provider (flydrive `FileSnapshot`). */
+export interface FileSnapshot {
+	key: string;
+	name: string;
+	contentLength: number;
+	/** ISO-8601 — a snapshot is meant to survive JSON. */
+	lastModified: string;
+	etag: string;
+	contentType?: string;
+}
+
 export class DriveFile {
 	isFile: true = true;
 	isDirectory: false = false;
@@ -84,6 +95,35 @@ export class DriveFile {
 
 	getUrl(): Promise<string> {
 		return this.#driver.url(this.key);
+	}
+
+	/** Contents as bytes in an ArrayBuffer view — what a Blob or fetch body wants. */
+	getArrayBuffer(): Promise<Uint8Array> {
+		return this.#driver.getBytes(this.key);
+	}
+
+	/** A URL a client can upload TO, without going through the app. */
+	getSignedUploadUrl(options?: SignedUrlOptions): string | Promise<string> {
+		return this.#driver.getSignedUploadUrl(this.key, options);
+	}
+
+	/**
+	 * A serializable description of this file (flydrive `toSnapshot`).
+	 *
+	 * Store it beside a record and rebuild the handle later with
+	 * `disk.fromSnapshot(...)` — that avoids a round-trip to the provider just
+	 * to render a name and a size.
+	 */
+	async toSnapshot(): Promise<FileSnapshot> {
+		const metadata = await this.getMetaData();
+		return {
+			key: this.key,
+			name: this.name,
+			contentLength: metadata.contentLength,
+			lastModified: metadata.lastModified.toISOString(),
+			etag: metadata.etag,
+			contentType: metadata.contentType,
+		};
 	}
 
 	getSignedUrl(options?: SignedUrlOptions): string | Promise<string> {

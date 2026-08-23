@@ -8,6 +8,7 @@ import { createHash, createHmac } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
+import * as url from "node:url";
 import { ArchiveError } from "./errors.js";
 import {
 	assertValidExpiry,
@@ -15,7 +16,7 @@ import {
 	parseExpiry,
 } from "./expiry.js";
 import { inferMimeType } from "./mime-types.js";
-import { DriveDirectory, DriveFile } from "./objects.js";
+import { DriveDirectory, DriveFile, type FileSnapshot } from "./objects.js";
 
 export { DriveDirectory, DriveFile } from "./objects.js";
 
@@ -780,6 +781,11 @@ export class LocalDriver implements StorageDriver {
 	}
 }
 
+/** A local path, given either plainly or as a `file:` URL. */
+function localPath(source: string | URL): string {
+	return source instanceof URL ? url.fileURLToPath(source) : source;
+}
+
 export class StorageManager {
 	#driver: StorageDriver;
 
@@ -793,6 +799,72 @@ export class StorageManager {
 		options?: WriteOptions,
 	): Promise<void> {
 		return this.#driver.put(filePath, content, options);
+	}
+
+	/**
+	 * A handle on one object, without reading it (flydrive `file`).
+	 *
+	 *   const avatar = disk.file(`avatars/${user.id}.png`)
+	 *   if (await avatar.exists()) return avatar.getUrl()
+	 *
+	 * Nothing is fetched until a method on the handle asks for it.
+	 */
+	file(key: string): DriveFile {
+		return new DriveFile(key, this.#driver);
+	}
+
+	/**
+	 * Rebuild a handle from a stored snapshot (flydrive `fromSnapshot`), so a
+	 * name and a size can be rendered without asking the provider again.
+	 */
+	fromSnapshot(snapshot: FileSnapshot): DriveFile {
+		return new DriveFile(snapshot.key, this.#driver, {
+			size: snapshot.contentLength,
+			contentLength: snapshot.contentLength,
+			mimeType: snapshot.contentType ?? "application/octet-stream",
+			contentType: snapshot.contentType ?? "application/octet-stream",
+			lastModified: new Date(snapshot.lastModified),
+			etag: snapshot.etag,
+			// A snapshot does not carry visibility. Assume private: guessing
+			// "public" for a file whose access we do not know is the one error
+			// with a consequence.
+			visibility: "private",
+		});
+	}
+
+	/**
+	 * Copy a file from the LOCAL filesystem into this disk.
+	 *
+	 * The one to reach for after an upload: the request left a file in a temp
+	 * directory and it has to reach the bucket. `copy()` moves within the disk
+	 * and cannot see the local path at all when the disk is remote.
+	 */
+	async copyFromFs(
+		source: string | URL,
+		destination: string,
+		options?: WriteOptions,
+	): Promise<void> {
+		await this.#driver.putStream(
+			destination,
+			fs.createReadStream(localPath(source)),
+			options,
+		);
+	}
+
+	/**
+	 * Move a file from the LOCAL filesystem into this disk, removing the source.
+	 *
+	 * The source is deleted only after the write succeeded — a failed upload
+	 * that also destroyed the only copy is not a trade anyone would take.
+	 */
+	async moveFromFs(
+		source: string | URL,
+		destination: string,
+		options?: WriteOptions,
+	): Promise<void> {
+		const from = localPath(source);
+		await this.copyFromFs(from, destination, options);
+		await fs.promises.unlink(from);
 	}
 
 	putStream(
