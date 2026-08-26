@@ -1,3 +1,7 @@
+/// <reference lib="dom" />
+// Uses the WHATWG fetch/Blob globals, which live in the DOM lib even on
+// Node. Referenced here so a consumer whose `lib` omits DOM still
+// typechecks our sources.
 /**
  * GcsDriver — Google Cloud Storage driver.
  *
