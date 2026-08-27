@@ -1,6 +1,6 @@
 {
   "name": "@c9up/archive",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Archive \u2014 File storage abstraction for the Ream framework (Local + S3-compatible drivers)",
   "license": "MIT",
   "type": "module",
@@ -29,8 +29,8 @@
     }
   },
   "peerDependencies": {
-    "@c9up/helix": "^0.1.9",
-    "@c9up/ream": "^0.1.0"
+    "@c9up/helix": "^0.2.0",
+    "@c9up/ream": "^0.2.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -41,7 +41,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.10",
-    "@c9up/helix": "^0.1.9",
+    "@c9up/helix": "^0.2.0",
     "@types/node": "^22.19.15",
     "typescript": "^6.0.2",
     "vitest": "^4.1.2"
