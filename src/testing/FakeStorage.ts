@@ -594,7 +594,7 @@ export function driveFake(drive: FakeableDrive) {
 }
 
 // Typing side of the plugin — importing `@c9up/archive/testing` augments the
-// helix test context with `drive` (the Japa pattern).
+// helix test context with `drive` (the helix pattern).
 declare module "@c9up/helix" {
 	interface TestContext {
 		drive: FakeStorageManager;
