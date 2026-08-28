@@ -763,13 +763,11 @@ export class LocalDriver implements StorageDriver {
 		});
 		for (const entry of entries) {
 			if (!entry.isFile()) continue;
-			// Node's readdirSync returns `parentPath` on the Dirent (Node
-			// 20.12+); fall back to `path` for older shapes.
-			const parent =
-				(entry as unknown as { parentPath?: string; path?: string })
-					.parentPath ??
-				(entry as unknown as { path?: string }).path ??
-				this.#root;
+			// `parentPath` is typed on Dirent since Node 20.12, which the engine
+			// range already requires — the double cast that used to read it
+			// (and its `path` fallback for older shapes) is no longer buying
+			// anything.
+			const parent = entry.parentPath ?? this.#root;
 			const full = path.join(parent, entry.name);
 			const rel = path.relative(this.#root, full).split(path.sep).join("/");
 			// Exclude sidecars — implementation detail.
