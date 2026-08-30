@@ -46,9 +46,28 @@ function gcsStrictEncode(str: string): string {
 	);
 }
 
-/** Encode an object path segment-by-segment, preserving `/`. */
+/**
+ * Encode an object path segment-by-segment, preserving `/`.
+ *
+ * This is the form the XML download endpoint and the V4 signing canonical
+ * resource want: the signing rules list the characters to percent-encode and
+ * `/` is not among them, so encoding it there would break every signature.
+ */
 function gcsEncodeKey(key: string): string {
 	return key.split("/").map(gcsStrictEncode).join("/");
+}
+
+/**
+ * Encode an object NAME for the JSON API, where the whole name is one path
+ * segment and `/` is part of it.
+ *
+ * The JSON API addresses `…/b/{bucket}/o/{object}`; an unencoded slash there
+ * makes the request address a different resource, which answers 404. Since
+ * `exists()` and `delete()` read a 404 as "not there", every object inside a
+ * prefix would silently look absent.
+ */
+function gcsEncodeObjectName(key: string): string {
+	return gcsStrictEncode(key);
 }
 
 /** Type guard matching the same pattern as `S3Driver.hasDestroy` —
@@ -218,7 +237,7 @@ export class GcsDriver implements StorageDriver {
 
 	async get(filePath: string): Promise<Buffer | null> {
 		const token = await this.#getAccessToken();
-		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}?alt=media`;
+		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}?alt=media`;
 		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
@@ -230,7 +249,7 @@ export class GcsDriver implements StorageDriver {
 
 	async getStream(filePath: string): Promise<NodeJS.ReadableStream> {
 		const token = await this.#getAccessToken();
-		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}?alt=media`;
+		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}?alt=media`;
 		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
@@ -251,7 +270,7 @@ export class GcsDriver implements StorageDriver {
 
 	async delete(filePath: string): Promise<boolean> {
 		const token = await this.#getAccessToken();
-		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}`;
+		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}`;
 		const res = await this.#fetch(url, {
 			method: "DELETE",
 			headers: { authorization: `Bearer ${token}` },
@@ -262,7 +281,7 @@ export class GcsDriver implements StorageDriver {
 
 	async exists(filePath: string): Promise<boolean> {
 		const token = await this.#getAccessToken();
-		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}`;
+		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}`;
 		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
@@ -292,7 +311,7 @@ export class GcsDriver implements StorageDriver {
 
 	async getMetadata(filePath: string): Promise<Metadata> {
 		const token = await this.#getAccessToken();
-		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}`;
+		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}`;
 		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
@@ -342,7 +361,7 @@ export class GcsDriver implements StorageDriver {
 
 	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
 		const token = await this.#getAccessToken();
-		const base = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(filePath)}/acl`;
+		const base = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}/acl`;
 		if (visibility === "public") {
 			const res = await this.#fetch(base, {
 				method: "POST",
@@ -373,7 +392,7 @@ export class GcsDriver implements StorageDriver {
 
 	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const token = await this.#getAccessToken();
-		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeKey(from)}/copyTo/b/${this.#config.bucket}/o/${gcsEncodeKey(to)}`;
+		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(from)}/copyTo/b/${this.#config.bucket}/o/${gcsEncodeObjectName(to)}`;
 		const res = await this.#fetch(url, {
 			method: "POST",
 			headers: { authorization: `Bearer ${token}` },

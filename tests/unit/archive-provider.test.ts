@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ArchiveAppContext } from "../../src/ArchiveProvider.js";
 import ArchiveProvider from "../../src/ArchiveProvider.js";
+import { services } from "../../src/DriveManager.js";
 import { LocalDriver, S3Driver, StorageManager } from "../../src/index.js";
 
 /**
@@ -176,5 +177,46 @@ describe("ArchiveProvider", () => {
 		provider.register();
 
 		await expect(provider.boot()).resolves.toBeUndefined();
+	});
+});
+
+describe("ArchiveProvider > the multi-disk bindings", () => {
+	it("binds the disk manager under 'drive', and the default disk under 'storage'", async () => {
+		const app = buildApp({
+			archive: {
+				default: "local",
+				services: { local: services.fs({ location: "./tmp-multi" }) },
+			},
+		});
+		const provider = new ArchiveProvider(app);
+		provider.register();
+
+		const drive = await app.container.resolve("drive");
+		const storage = await app.container.resolve("storage");
+
+		expect(drive).toBeDefined();
+		// `storage` is the default disk of `drive`, not a second manager over
+		// its own driver — two managers would mean two roots.
+		expect(storage).toBe(await app.container.resolve(StorageManager));
+	});
+
+	it("resolves the same manager whichever token is asked for", async () => {
+		const app = buildApp({
+			archive: { driver: "local", local: { root: "./tmp-tokens" } },
+		});
+		const provider = new ArchiveProvider(app);
+		provider.register();
+
+		expect(await app.container.resolve("storage")).toBe(
+			await app.container.resolve(StorageManager),
+		);
+	});
+
+	it("has nothing to do on the remaining lifecycle hooks", async () => {
+		const provider = new ArchiveProvider(buildApp({}));
+
+		await expect(provider.start()).resolves.toBeUndefined();
+		await expect(provider.ready()).resolves.toBeUndefined();
+		await expect(provider.shutdown()).resolves.toBeUndefined();
 	});
 });

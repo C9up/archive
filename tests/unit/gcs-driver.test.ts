@@ -353,8 +353,11 @@ describe("GcsDriver", () => {
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
 			await driver.copy("src/a.txt", "dst/b.txt");
 			const [url, init] = fetchSpy.mock.calls[1] ?? [];
+			// The JSON API addresses one object as one path segment, so the
+			// slashes inside the name are percent-encoded — left raw they
+			// address a different resource, which answers 404.
 			expect(String(url)).toContain(
-				"/storage/v1/b/my-bucket/o/src/a.txt/copyTo/b/my-bucket/o/dst/b.txt",
+				"/storage/v1/b/my-bucket/o/src%2Fa.txt/copyTo/b/my-bucket/o/dst%2Fb.txt",
 			);
 			expect((init as RequestInit).method).toBe("POST");
 			const headers = (init as RequestInit).headers as Record<string, string>;
@@ -430,5 +433,283 @@ describe("GcsDriver", () => {
 				"https://storage.googleapis.com/my-bucket/folder/cat.png",
 			);
 		});
+	});
+});
+
+describe("GcsDriver > listing, deleting a prefix, and the rest", () => {
+	let driver: GcsDriver;
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	const json = (body: unknown) =>
+		new Response(JSON.stringify(body), {
+			status: 200,
+			headers: { "content-type": "application/json" },
+		});
+
+	beforeEach(() => {
+		driver = buildDriver();
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+		// Every call below needs a token first.
+		fetchSpy.mockResolvedValueOnce(tokenResponse());
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	/** The request the driver made, skipping the token exchange. */
+	const call = (n: number) =>
+		fetchSpy.mock.calls[n + 1] as [string, RequestInit];
+
+	it("yields the directories before the files, and drops the trailing slash", async () => {
+		fetchSpy.mockResolvedValueOnce(
+			json({
+				prefixes: ["invoices/2026/"],
+				items: [
+					{
+						name: "invoices/readme.txt",
+						size: "12",
+						updated: "2026-03-14T00:00:00.000Z",
+						contentType: "text/plain",
+						etag: '"abc"',
+					},
+				],
+			}),
+		);
+
+		const objects = [...(await driver.listAll("invoices")).objects];
+
+		expect(objects.map((o) => (o.isDirectory ? o.prefix : o.key))).toEqual([
+			"invoices/2026",
+			"invoices/readme.txt",
+		]);
+		const file = objects[1];
+		if (!file.isFile) throw new Error("expected a file");
+		expect(await file.getMetaData()).toMatchObject({
+			size: 12,
+			mimeType: "text/plain",
+			etag: "abc",
+		});
+	});
+
+	it("adds the delimiter and the trailing slash by default", async () => {
+		fetchSpy.mockResolvedValueOnce(json({}));
+
+		await driver.listAll("invoices");
+
+		// Without the delimiter GCS returns every descendant, so a
+		// non-recursive listing would silently become a recursive one.
+		const url = String(call(0)[0]);
+		expect(url).toContain("delimiter=%2F");
+		expect(url).toContain("prefix=invoices%2F");
+	});
+
+	it("drops the delimiter when the caller asked to recurse", async () => {
+		fetchSpy.mockResolvedValueOnce(json({}));
+
+		await driver.listAll("invoices", { recursive: true });
+
+		expect(String(call(0)[0])).not.toContain("delimiter");
+	});
+
+	it("reads the bucket root from an empty prefix and from a bare slash", async () => {
+		fetchSpy.mockResolvedValueOnce(json({}));
+		fetchSpy.mockResolvedValueOnce(json({}));
+
+		await driver.listAll("");
+		await driver.listAll("/");
+
+		expect(String(call(0)[0])).toContain("prefix=&");
+		expect(String(call(1)[0])).toContain("prefix=&");
+	});
+
+	it("carries the caller's page token, and hands the next one back", async () => {
+		fetchSpy.mockResolvedValueOnce(json({ nextPageToken: "page3" }));
+
+		const result = await driver.listAll("a", { paginationToken: "page2" });
+
+		expect(String(call(0)[0])).toContain("pageToken=page2");
+		expect(result.paginationToken).toBe("page3");
+	});
+
+	it("says so rather than returning an empty listing on a failure", async () => {
+		fetchSpy.mockResolvedValueOnce(new Response("denied", { status: 403 }));
+
+		// An empty listing reads as "the prefix is empty", which is how a
+		// deleteAll over it silently does nothing.
+		await expect(driver.listAll("a")).rejects.toThrow(
+			/GCS LIST failed \(403\)/,
+		);
+	});
+
+	it("deletes every object under a prefix, one at a time", async () => {
+		// GCS has no batch delete; the listing is drained first so the
+		// deletes cannot disturb the pagination cursor.
+		fetchSpy.mockResolvedValueOnce(
+			json({ items: [{ name: "cat/a.txt" }, { name: "cat/b.txt" }] }),
+		);
+		fetchSpy.mockResolvedValue(new Response(null, { status: 204 }));
+
+		await driver.deleteAll("cat/");
+
+		expect(String(call(1)[0])).toContain("cat%2Fa.txt");
+		expect(call(1)[1].method).toBe("DELETE");
+		expect(String(call(2)[0])).toContain("cat%2Fb.txt");
+	});
+
+	it("issues no delete for an empty prefix", async () => {
+		fetchSpy.mockResolvedValueOnce(json({ items: [] }));
+
+		await driver.deleteAll("cat/");
+
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("move copies then deletes the source", async () => {
+		fetchSpy.mockResolvedValue(new Response("{}", { status: 200 }));
+
+		await driver.move("a.txt", "b.txt");
+
+		expect(call(0)[1].method).toBe("POST");
+		expect(String(call(0)[0])).toContain("copyTo");
+		expect(call(1)[1].method).toBe("DELETE");
+	});
+
+	it("leaves the source in place when the copy failed", async () => {
+		// Deleting after a failed copy loses the object outright.
+		fetchSpy.mockResolvedValueOnce(new Response("denied", { status: 403 }));
+
+		await expect(driver.move("a.txt", "b.txt")).rejects.toThrow();
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it("getBytes returns the body as bytes, and says when it is missing", async () => {
+		fetchSpy.mockResolvedValueOnce(new Response("hello", { status: 200 }));
+		expect(Buffer.from(await driver.getBytes("a.txt")).toString()).toBe(
+			"hello",
+		);
+
+		fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
+		await expect(driver.getBytes("a.txt")).rejects.toMatchObject({
+			code: "ARCHIVE_NOT_FOUND",
+		});
+	});
+
+	it("signs an upload URL that differs from the download one", () => {
+		const upload = driver.getSignedUploadUrl("a.txt");
+		const download = driver.getSignedUrl("a.txt");
+
+		// The method is part of the signature: handing a GET-signed URL to
+		// an uploader fails at the far end with a signature mismatch.
+		expect(upload).toContain("X-Goog-Signature=");
+		expect(upload).toContain("X-Goog-SignedHeaders=host");
+		expect(upload).not.toBe(download);
+	});
+
+	it("honours a custom expiry on an upload URL, and refuses one out of range", () => {
+		expect(driver.getSignedUploadUrl("a.txt", { expiresIn: 60 })).toContain(
+			"X-Goog-Expires=60",
+		);
+		expect(() =>
+			driver.getSignedUploadUrl("a.txt", { expiresIn: -1 }),
+		).toThrow();
+	});
+});
+
+describe("GcsDriver > a key inside a prefix", () => {
+	let driver: GcsDriver;
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		driver = buildDriver();
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+		fetchSpy.mockResolvedValueOnce(tokenResponse());
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	/** The last URL requested — the token exchange only happens once. */
+	const requested = () => String(fetchSpy.mock.calls.at(-1)?.[0]);
+
+	/**
+	 * The JSON API addresses `…/b/{bucket}/o/{object}` where the whole object
+	 * name is ONE path segment. A raw slash there addresses a different
+	 * resource, which answers 404 — and since `exists()`/`delete()` read a 404
+	 * as "not there", every object inside a prefix would look absent while
+	 * reporting no error at all.
+	 */
+	it("percent-encodes the slashes on every JSON-API call", async () => {
+		const cases: Array<[string, () => Promise<unknown>]> = [
+			["get", () => driver.get("invoices/2026/a.pdf")],
+			["getBytes", () => driver.getBytes("invoices/2026/a.pdf")],
+			["getStream", () => driver.getStream("invoices/2026/a.pdf")],
+			["delete", () => driver.delete("invoices/2026/a.pdf")],
+			["exists", () => driver.exists("invoices/2026/a.pdf")],
+			["getMetadata", () => driver.getMetadata("invoices/2026/a.pdf")],
+			[
+				"setVisibility",
+				() => driver.setVisibility("invoices/2026/a.pdf", "public"),
+			],
+		];
+
+		for (const [name, run] of cases) {
+			fetchSpy.mockClear();
+			fetchSpy.mockResolvedValueOnce(tokenResponse());
+			fetchSpy.mockResolvedValue(
+				new Response(JSON.stringify({ acl: [] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			);
+
+			await run().catch(() => undefined);
+
+			expect(requested(), name).toContain("invoices%2F2026%2Fa.pdf");
+			expect(requested(), name).not.toContain("/o/invoices/2026/");
+		}
+	});
+
+	it("leaves the slashes alone on the public URL", () => {
+		// The download endpoint takes the name as a real path, and a `%2F` in
+		// a public URL is what a CDN in front will not match.
+		expect(driver.publicUrl("invoices/2026/a.pdf")).toBe(
+			"https://storage.googleapis.com/my-bucket/invoices/2026/a.pdf",
+		);
+	});
+
+	it("leaves the slashes alone in a signed URL", () => {
+		// The V4 signing rules list the characters to percent-encode, and `/`
+		// is not among them: encoding it would break every signature.
+		const url = driver.getSignedUrl("invoices/2026/a.pdf");
+
+		expect(url).toContain("/my-bucket/invoices/2026/a.pdf?");
+		expect(url).toContain("X-Goog-Signature=");
+	});
+
+	it("still encodes the characters that are reserved everywhere", () => {
+		expect(driver.publicUrl("a b&c.txt")).toContain("a%20b%26c.txt");
+	});
+});
+
+describe("GcsDriver > visibility read through metadata", () => {
+	it("reports the visibility the ACL implies", async () => {
+		const driver = buildDriver();
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		fetchSpy.mockResolvedValueOnce(tokenResponse());
+		fetchSpy.mockResolvedValueOnce(
+			new Response(
+				JSON.stringify({
+					size: "5",
+					updated: "2026-03-14T00:00:00.000Z",
+					acl: [{ entity: "allUsers", role: "READER" }],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			),
+		);
+
+		expect(await driver.getVisibility("a.txt")).toBe("public");
+		fetchSpy.mockRestore();
 	});
 });

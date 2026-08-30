@@ -484,3 +484,370 @@ describe("S3Driver", () => {
 		});
 	});
 });
+
+describe("S3Driver > listing a prefix as a page", () => {
+	let driver: S3Driver;
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	const listing = (body: string) => new Response(body, { status: 200 });
+
+	beforeEach(() => {
+		driver = new S3Driver({
+			bucket: "my-bucket",
+			region: "us-east-1",
+			accessKeyId: "AKIATEST",
+			secretAccessKey: "secret",
+		});
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	it("yields the directories before the files, and drops the trailing slash", async () => {
+		fetchSpy.mockResolvedValueOnce(
+			listing(`<?xml version="1.0"?>
+<ListBucketResult>
+  <CommonPrefixes><Prefix>invoices/2026/</Prefix></CommonPrefixes>
+  <CommonPrefixes><Prefix>invoices/2025/</Prefix></CommonPrefixes>
+  <Contents><Key>invoices/readme.txt</Key><Size>12</Size><LastModified>2026-01-01T00:00:00.000Z</LastModified><ETag>"abc"</ETag></Contents>
+  <IsTruncated>false</IsTruncated>
+</ListBucketResult>`),
+		);
+
+		const result = await driver.listAll("invoices");
+		const objects = [...result.objects];
+
+		expect(objects.map((o) => (o.isDirectory ? o.prefix : o.key))).toEqual([
+			"invoices/2026",
+			"invoices/2025",
+			"invoices/readme.txt",
+		]);
+		expect(objects[0].isDirectory).toBe(true);
+		expect(objects[2].isFile).toBe(true);
+	});
+
+	it("adds the delimiter and the trailing slash to the prefix by default", async () => {
+		fetchSpy.mockResolvedValueOnce(listing("<ListBucketResult/>"));
+
+		await driver.listAll("invoices");
+
+		// Without the delimiter S3 returns every descendant, so a
+		// non-recursive listing would silently become a recursive one.
+		const url = String(fetchSpy.mock.calls[0]?.[0]);
+		expect(url).toContain("delimiter=%2F");
+		expect(url).toContain("prefix=invoices%2F");
+	});
+
+	it("drops the delimiter when the caller asked to recurse", async () => {
+		fetchSpy.mockResolvedValueOnce(listing("<ListBucketResult/>"));
+
+		await driver.listAll("invoices", { recursive: true });
+
+		const url = String(fetchSpy.mock.calls[0]?.[0]);
+		expect(url).not.toContain("delimiter");
+		expect(url).toContain("prefix=invoices");
+	});
+
+	it("reads the bucket root from an empty prefix, and from a bare slash", async () => {
+		fetchSpy.mockResolvedValueOnce(listing("<ListBucketResult/>"));
+		fetchSpy.mockResolvedValueOnce(listing("<ListBucketResult/>"));
+
+		await driver.listAll("");
+		await driver.listAll("/");
+
+		for (const call of fetchSpy.mock.calls) {
+			// An empty prefix, not the literal "/" — which would list nothing.
+			expect(String(call[0])).toMatch(/[?&]prefix=(&|$)/);
+		}
+	});
+
+	it("carries the caller's pagination token", async () => {
+		fetchSpy.mockResolvedValueOnce(listing("<ListBucketResult/>"));
+
+		await driver.listAll("invoices", { paginationToken: "page2" });
+
+		expect(String(fetchSpy.mock.calls[0]?.[0])).toContain(
+			"continuation-token=page2",
+		);
+	});
+
+	it("hands back the next token only when the page was truncated", async () => {
+		fetchSpy.mockResolvedValueOnce(
+			listing(`<ListBucketResult>
+  <IsTruncated>true</IsTruncated>
+  <NextContinuationToken>page2</NextContinuationToken>
+</ListBucketResult>`),
+		);
+		expect((await driver.listAll("a")).paginationToken).toBe("page2");
+
+		fetchSpy.mockResolvedValueOnce(
+			listing(`<ListBucketResult>
+  <IsTruncated>false</IsTruncated>
+  <NextContinuationToken>page2</NextContinuationToken>
+</ListBucketResult>`),
+		);
+		// A token on a complete page would make the caller loop forever.
+		expect((await driver.listAll("a")).paginationToken).toBeUndefined();
+	});
+
+	it("reads the fields whatever order the server emits them in", async () => {
+		// R2 and some MinIO builds order them differently from AWS; an
+		// ordered regex would yield corrupt values without failing.
+		fetchSpy.mockResolvedValueOnce(
+			listing(`<ListBucketResult>
+  <Contents><ETag>"xyz"</ETag><LastModified>2026-03-14T00:00:00.000Z</LastModified><Size>42</Size><Key>a.txt</Key></Contents>
+</ListBucketResult>`),
+		);
+
+		const [file] = [...(await driver.listAll("", { recursive: true })).objects];
+
+		if (!file.isFile) throw new Error("expected a file");
+		expect(file.key).toBe("a.txt");
+		expect(file.name).toBe("a.txt");
+	});
+
+	it("says so rather than returning an empty listing on a failure", async () => {
+		fetchSpy.mockResolvedValueOnce(new Response("denied", { status: 403 }));
+
+		// An empty listing reads as "the prefix is empty", which is how a
+		// deleteAll over it silently does nothing.
+		await expect(driver.listAll("a")).rejects.toThrow(/S3 LIST failed \(403\)/);
+	});
+});
+
+describe("S3Driver > deleting a whole prefix", () => {
+	let driver: S3Driver;
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		driver = new S3Driver({
+			bucket: "my-bucket",
+			region: "us-east-1",
+			accessKeyId: "AKIATEST",
+			secretAccessKey: "secret",
+		});
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	const page = (keys: string[], next?: string) =>
+		new Response(
+			`<ListBucketResult>${keys
+				.map((k) => `<Contents><Key>${k}</Key><Size>1</Size></Contents>`)
+				.join("")}<IsTruncated>${next ? "true" : "false"}</IsTruncated>${
+				next ? `<NextContinuationToken>${next}</NextContinuationToken>` : ""
+			}</ListBucketResult>`,
+			{ status: 200 },
+		);
+
+	it("batch-deletes what it listed, with the Content-MD5 S3 requires", async () => {
+		fetchSpy.mockResolvedValueOnce(page(["cat/a.txt", "cat/b.txt"]));
+		fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+		await driver.deleteAll("cat/");
+
+		const [url, init] = fetchSpy.mock.calls[1] as [string, RequestInit];
+		expect(String(url)).toContain("?delete");
+		expect(init.method).toBe("POST");
+		const headers = init.headers as Record<string, string>;
+		// S3 refuses a DeleteObjects with no Content-MD5.
+		expect(headers["content-md5"]).toBeTruthy();
+		expect(String(init.body)).toContain("<Key>cat/a.txt</Key>");
+		expect(String(init.body)).toContain("<Key>cat/b.txt</Key>");
+	});
+
+	it("escapes a key that would otherwise break the request body", async () => {
+		fetchSpy.mockResolvedValueOnce(page(["cat/a&b.txt"]));
+		fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+		await driver.deleteAll("cat/");
+
+		const init = fetchSpy.mock.calls[1]?.[1] as RequestInit;
+		expect(String(init.body)).toContain("a&amp;b.txt");
+	});
+
+	it("keeps going until the prefix is drained", async () => {
+		fetchSpy.mockResolvedValueOnce(page(["cat/a.txt"], "page2"));
+		fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+		fetchSpy.mockResolvedValueOnce(page(["cat/b.txt"]));
+		fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+
+		await driver.deleteAll("cat/");
+
+		// Stopping at the first page leaves objects behind while reporting
+		// success — the caller believes the prefix is gone.
+		expect(fetchSpy).toHaveBeenCalledTimes(4);
+		expect(String(fetchSpy.mock.calls[2]?.[0])).toContain(
+			"continuation-token=page2",
+		);
+	});
+
+	it("issues no delete for an empty prefix", async () => {
+		fetchSpy.mockResolvedValueOnce(page([]));
+
+		await driver.deleteAll("cat/");
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("says so when the listing fails", async () => {
+		fetchSpy.mockResolvedValueOnce(new Response("denied", { status: 403 }));
+
+		await expect(driver.deleteAll("cat/")).rejects.toThrow(/S3 LIST failed/);
+	});
+
+	it("says so when the batch delete fails", async () => {
+		fetchSpy.mockResolvedValueOnce(page(["cat/a.txt"]));
+		fetchSpy.mockResolvedValueOnce(new Response("denied", { status: 403 }));
+
+		await expect(driver.deleteAll("cat/")).rejects.toThrow(
+			/S3 DeleteObjects failed \(403\)/,
+		);
+	});
+});
+
+describe("S3Driver > move and getBytes", () => {
+	let driver: S3Driver;
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		driver = new S3Driver({
+			bucket: "my-bucket",
+			region: "us-east-1",
+			accessKeyId: "AKIATEST",
+			secretAccessKey: "secret",
+		});
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	it("move copies then deletes the source", async () => {
+		fetchSpy.mockResolvedValue(new Response("", { status: 200 }));
+
+		await driver.move("a.txt", "b.txt");
+
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
+		expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({ method: "PUT" });
+		expect(fetchSpy.mock.calls[1]?.[1]).toMatchObject({ method: "DELETE" });
+	});
+
+	it("leaves the source in place when the copy failed", async () => {
+		// Deleting after a failed copy loses the object outright.
+		fetchSpy.mockResolvedValueOnce(new Response("denied", { status: 403 }));
+
+		await expect(driver.move("a.txt", "b.txt")).rejects.toThrow();
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("getBytes returns the body as bytes", async () => {
+		fetchSpy.mockResolvedValueOnce(new Response("hello", { status: 200 }));
+
+		const bytes = await driver.getBytes("a.txt");
+
+		expect(Buffer.from(bytes).toString()).toBe("hello");
+	});
+
+	it("getBytes says the object is missing rather than returning nothing", async () => {
+		fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
+
+		await expect(driver.getBytes("a.txt")).rejects.toMatchObject({
+			code: "ARCHIVE_NOT_FOUND",
+		});
+	});
+});
+
+describe("S3Driver > the last of the surface", () => {
+	let driver: S3Driver;
+	let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		driver = new S3Driver({
+			bucket: "my-bucket",
+			region: "us-east-1",
+			accessKeyId: "AKIATEST",
+			secretAccessKey: "secret",
+		});
+		fetchSpy = vi.spyOn(globalThis, "fetch");
+	});
+
+	afterEach(() => {
+		fetchSpy.mockRestore();
+	});
+
+	it("reads visibility off the object's ACL", async () => {
+		fetchSpy.mockResolvedValueOnce(
+			new Response(
+				`<AccessControlPolicy><AccessControlList><Grant><Grantee><URI>http://acs.amazonaws.com/groups/global/AllUsers</URI></Grantee><Permission>READ</Permission></Grant></AccessControlList></AccessControlPolicy>`,
+				{ status: 200 },
+			),
+		);
+		expect(await driver.getVisibility("a.txt")).toBe("public");
+
+		fetchSpy.mockResolvedValueOnce(
+			new Response("<AccessControlPolicy/>", { status: 200 }),
+		);
+		expect(await driver.getVisibility("a.txt")).toBe("private");
+	});
+
+	it("signs an upload URL that differs from the download one", () => {
+		const upload = driver.getSignedUploadUrl("a.txt");
+		const download = driver.getSignedUrl("a.txt");
+
+		// The method is part of the signature: a GET-signed URL handed to an
+		// uploader fails at the far end with a signature mismatch.
+		expect(upload).toContain("X-Amz-Signature=");
+		expect(upload).not.toBe(download);
+	});
+
+	it("aborts the multipart upload when a part fails", async () => {
+		const big = Buffer.alloc(6 * 1024 * 1024);
+		fetchSpy.mockResolvedValueOnce(
+			new Response(
+				"<InitiateMultipartUploadResult><UploadId>u1</UploadId></InitiateMultipartUploadResult>",
+				{ status: 200 },
+			),
+		);
+		fetchSpy.mockResolvedValueOnce(new Response("boom", { status: 500 }));
+		fetchSpy.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+		await expect(
+			driver.putStream("big.bin", Readable.from([big]), {
+				contentLength: big.length,
+			}),
+		).rejects.toThrow();
+
+		// Staged parts that are never aborted keep being billed.
+		const abort = fetchSpy.mock.calls.at(-1) as [string, RequestInit];
+		expect(String(abort[0])).toContain("uploadId=u1");
+		expect(abort[1].method).toBe("DELETE");
+	});
+
+	it("reports the original failure, not the abort's outcome", async () => {
+		const big = Buffer.alloc(6 * 1024 * 1024);
+		fetchSpy.mockResolvedValueOnce(
+			new Response(
+				"<InitiateMultipartUploadResult><UploadId>u1</UploadId></InitiateMultipartUploadResult>",
+				{ status: 200 },
+			),
+		);
+		fetchSpy.mockResolvedValueOnce(
+			new Response("part failed", { status: 500 }),
+		);
+		// The abort itself fails too — the caller still needs the real cause.
+		fetchSpy.mockRejectedValueOnce(new Error("abort also failed"));
+
+		await expect(
+			driver.putStream("big.bin", Readable.from([big]), {
+				contentLength: big.length,
+			}),
+		).rejects.toThrow(/part failed|500/);
+	});
+});
