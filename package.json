@@ -1,6 +1,6 @@
 {
   "name": "@c9up/archive",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Archive \u2014 File storage abstraction for the Ream framework (Local + S3-compatible drivers)",
   "license": "MIT",
   "type": "module",
@@ -14,6 +14,10 @@
     "./provider": {
       "types": "./src/ArchiveProvider.ts",
       "import": "./src/ArchiveProvider.ts"
+    },
+    "./configure": {
+      "types": "./src/configure.ts",
+      "import": "./src/configure.ts"
     },
     "./services/main": {
       "types": "./src/services/main.ts",
@@ -66,6 +70,10 @@
       "./provider": {
         "types": "./dist/ArchiveProvider.d.ts",
         "import": "./dist/ArchiveProvider.js"
+      },
+      "./configure": {
+        "types": "./dist/configure.d.ts",
+        "import": "./dist/configure.js"
       },
       "./services/main": {
         "types": "./dist/services/main.d.ts",
