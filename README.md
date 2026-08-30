@@ -11,6 +11,9 @@ pnpm add @c9up/archive
 ream configure @c9up/archive
 ```
 
+`ream add @c9up/archive` installs it, registers the provider and writes
+`config/archive.ts`. The rest of this page assumes that has run.
+
 ## Usage
 
 Register the provider in your app, then configure it under `config/archive.ts`:
