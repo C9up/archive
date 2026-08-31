@@ -221,7 +221,7 @@ describe("archive > the local disk", () => {
 				"hello",
 			);
 			await expect(driver.getBytes("missing.txt")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 

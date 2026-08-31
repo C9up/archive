@@ -45,7 +45,7 @@ const UNIT_SECONDS: Record<string, number> = {
  * Normalise a signed-URL `expiresIn` into a number of seconds. Accepts
  * either a raw number of seconds (returned as-is) or a human-friendly
  * duration string such as `'30mins'`, `'7 days'`, `'1h'` — AdonisJS
- * Drive parity. Unrecognised strings throw `ARCHIVE_INVALID_EXPIRY`.
+ * Drive parity. Unrecognised strings throw `E_ARCHIVE_INVALID_EXPIRY`.
  */
 export function parseExpiry(expiresIn: number | string): number {
 	if (typeof expiresIn === "number") return expiresIn;
@@ -54,7 +54,7 @@ export function parseExpiry(expiresIn: number | string): number {
 	const multiplier = unitKey === "" ? 1 : UNIT_SECONDS[unitKey];
 	if (match === undefined || match === null || multiplier === undefined) {
 		throw new ArchiveError(
-			"ARCHIVE_INVALID_EXPIRY",
+			"E_ARCHIVE_INVALID_EXPIRY",
 			`Signed-URL expiresIn string '${expiresIn}' could not be parsed`,
 			{
 				hint: "Use a number of seconds, or a duration like '30mins', '1h', '7 days'.",
@@ -66,26 +66,26 @@ export function parseExpiry(expiresIn: number | string): number {
 
 /**
  * Reject non-finite, zero, negative, or out-of-range expiries. Throws
- * `ARCHIVE_INVALID_EXPIRY` so callers get a typed error with a hint.
+ * `E_ARCHIVE_INVALID_EXPIRY` so callers get a typed error with a hint.
  */
 export function assertValidExpiry(expiresIn: number): void {
 	if (!Number.isFinite(expiresIn)) {
 		throw new ArchiveError(
-			"ARCHIVE_INVALID_EXPIRY",
+			"E_ARCHIVE_INVALID_EXPIRY",
 			`Signed-URL expiresIn must be finite, got ${expiresIn}`,
 			{ hint: "Pass a positive number of seconds between 1 and 604800." },
 		);
 	}
 	if (expiresIn <= 0) {
 		throw new ArchiveError(
-			"ARCHIVE_INVALID_EXPIRY",
+			"E_ARCHIVE_INVALID_EXPIRY",
 			`Signed-URL expiresIn must be > 0 seconds, got ${expiresIn}`,
 			{ hint: "Pass a positive number of seconds between 1 and 604800." },
 		);
 	}
 	if (expiresIn > MAX_EXPIRES_IN) {
 		throw new ArchiveError(
-			"ARCHIVE_INVALID_EXPIRY",
+			"E_ARCHIVE_INVALID_EXPIRY",
 			`Signed-URL expiresIn must be <= ${MAX_EXPIRES_IN} seconds (7 days), got ${expiresIn}`,
 			{ hint: "AWS SigV4 caps presigned URLs at 7 days." },
 		);

@@ -139,7 +139,7 @@ function buildDriver(config: ArchiveConfig): StorageDriver {
 	if (config.driver === "s3") {
 		if (!config.s3) {
 			throw new ArchiveError(
-				"ARCHIVE_CONFIG_MISSING",
+				"E_ARCHIVE_CONFIG_MISSING",
 				"Archive config.driver is 's3' but config.s3 is missing",
 				{
 					hint: "Provide { bucket, accessKeyId, secretAccessKey, region?, endpoint? } under config.archive.s3.",
@@ -151,7 +151,7 @@ function buildDriver(config: ArchiveConfig): StorageDriver {
 	if (config.driver === "gcs") {
 		if (!config.gcs) {
 			throw new ArchiveError(
-				"ARCHIVE_CONFIG_MISSING",
+				"E_ARCHIVE_CONFIG_MISSING",
 				"Archive config.driver is 'gcs' but config.gcs is missing",
 				{
 					hint: "Provide { bucket, serviceAccount: { client_email, private_key } } under config.archive.gcs.",
@@ -170,7 +170,7 @@ function buildDriver(config: ArchiveConfig): StorageDriver {
 	// `{ driver: 'locla' }` does not silently fall through to the
 	// local driver and write files to an unexpected location.
 	throw new ArchiveError(
-		"ARCHIVE_INVALID_DRIVER",
+		"E_ARCHIVE_INVALID_DRIVER",
 		`Archive config.driver must be 'local', 's3', or 'gcs', got '${String(config.driver)}'`,
 		{ hint: "Set config.archive.driver to 'local', 's3', or 'gcs'." },
 	);

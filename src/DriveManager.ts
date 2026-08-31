@@ -90,7 +90,7 @@ export class DriveManager {
 	constructor(config: DriveConfig) {
 		if (config.services[config.default] === undefined) {
 			throw new ArchiveError(
-				"ARCHIVE_UNKNOWN_DISK",
+				"E_ARCHIVE_UNKNOWN_DISK",
 				`Archive default disk '${config.default}' is not present in config.services`,
 				{
 					hint: `Add a '${config.default}' entry to config.services, or point config.default at an existing disk.`,
@@ -114,7 +114,7 @@ export class DriveManager {
 		const factory = this.#config.services[name];
 		if (factory === undefined) {
 			throw new ArchiveError(
-				"ARCHIVE_UNKNOWN_DISK",
+				"E_ARCHIVE_UNKNOWN_DISK",
 				`Archive disk '${name}' is not configured`,
 				{
 					hint: `Known disks: ${Object.keys(this.#config.services).join(", ") || "(none)"}.`,

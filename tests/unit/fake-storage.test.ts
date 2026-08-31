@@ -48,9 +48,9 @@ describe("FakeStorage", () => {
 		expect(out.toString("utf8")).toBe("hello streams");
 	});
 
-	it("getStream on missing throws ARCHIVE_NOT_FOUND", async () => {
+	it("getStream on missing throws E_ARCHIVE_NOT_FOUND", async () => {
 		await expect(storage.getStream("none")).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 
@@ -69,10 +69,10 @@ describe("FakeStorage", () => {
 		expect((await storage.getMetadata("cat.txt")).visibility).toBe("private");
 	});
 
-	it("setVisibility on missing throws ARCHIVE_NOT_FOUND", async () => {
+	it("setVisibility on missing throws E_ARCHIVE_NOT_FOUND", async () => {
 		await expect(
 			storage.setVisibility("none", "private"),
-		).rejects.toMatchObject({ code: "ARCHIVE_NOT_FOUND" });
+		).rejects.toMatchObject({ code: "E_ARCHIVE_NOT_FOUND" });
 	});
 
 	it("url branches on visibility", async () => {
@@ -97,7 +97,7 @@ describe("FakeStorage", () => {
 		expect(exp).toBeGreaterThanOrEqual(now + 55);
 		expect(exp).toBeLessThanOrEqual(now + 65);
 		expect(() => storage.getSignedUrl("x", { expiresIn: 0 })).toThrow(
-			expect.objectContaining({ code: "ARCHIVE_INVALID_EXPIRY" }),
+			expect.objectContaining({ code: "E_ARCHIVE_INVALID_EXPIRY" }),
 		);
 	});
 
@@ -111,9 +111,9 @@ describe("FakeStorage", () => {
 		expect((await storage.getMetadata("dst.txt")).visibility).toBe("public");
 	});
 
-	it("copy throws ARCHIVE_NOT_FOUND when source is missing", async () => {
+	it("copy throws E_ARCHIVE_NOT_FOUND when source is missing", async () => {
 		await expect(storage.copy("none", "dst")).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 

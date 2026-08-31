@@ -75,7 +75,7 @@ export class FakeStorage implements StorageDriver {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Fake object does not exist at path '${filePath}'`,
 				{ hint: "put() it first, or verify the test setup." },
 			);
@@ -114,7 +114,7 @@ export class FakeStorage implements StorageDriver {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Fake object does not exist at path '${filePath}'`,
 				{ hint: "put() it first, or verify the test setup." },
 			);
@@ -164,7 +164,7 @@ export class FakeStorage implements StorageDriver {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Fake object does not exist at path '${filePath}'`,
 				{ hint: "put() it first, or verify the test setup." },
 			);
@@ -176,7 +176,7 @@ export class FakeStorage implements StorageDriver {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Fake object does not exist at path '${filePath}'`,
 				{ hint: "put() it first, or verify the test setup." },
 			);
@@ -199,7 +199,7 @@ export class FakeStorage implements StorageDriver {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Cannot set visibility — fake object does not exist at path '${filePath}'`,
 				{ hint: "put() the file before calling setVisibility()." },
 			);
@@ -211,7 +211,7 @@ export class FakeStorage implements StorageDriver {
 		const src = this.#store.get(from);
 		if (!src) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Cannot copy — fake source does not exist at path '${from}'`,
 				{ hint: "Confirm the source path was put() first." },
 			);
@@ -230,7 +230,7 @@ export class FakeStorage implements StorageDriver {
 		const src = this.#store.get(from);
 		if (!src) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Cannot move — fake source does not exist at path '${from}'`,
 				{ hint: "Confirm the source path was put() first." },
 			);

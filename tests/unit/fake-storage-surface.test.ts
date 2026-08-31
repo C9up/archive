@@ -30,7 +30,7 @@ describe("archive > the fake's read surface", () => {
 
 		expect(Buffer.from(await fake.getBytes("a.txt")).toString()).toBe("hello");
 		await expect(fake.getBytes("missing.txt")).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 
@@ -40,7 +40,7 @@ describe("archive > the fake's read surface", () => {
 
 		expect(await fake.getVisibility("a.txt")).toBe("public");
 		await expect(fake.getVisibility("missing.txt")).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 

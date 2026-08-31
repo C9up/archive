@@ -131,7 +131,7 @@ export class GcsDriver implements StorageDriver {
 		} catch (err) {
 			if (err instanceof Error && err.name === "TimeoutError") {
 				throw new ArchiveError(
-					"ARCHIVE_REQUEST_TIMEOUT",
+					"E_ARCHIVE_REQUEST_TIMEOUT",
 					`The storage provider did not answer within ${ms}ms.`,
 					{
 						hint: "Raise `requestTimeoutMs` for large objects, or check connectivity to the bucket.",
@@ -197,7 +197,7 @@ export class GcsDriver implements StorageDriver {
 		const buf = await this.get(filePath);
 		if (buf === null) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`GCS object does not exist at path '${filePath}'`,
 				{
 					hint: "Confirm the bucket + key and that the object was put() first.",
@@ -256,7 +256,7 @@ export class GcsDriver implements StorageDriver {
 		});
 		if (res.status === 404) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`GCS object does not exist at path '${filePath}'`,
 				{
 					hint: "Confirm the bucket + key and that the object was put() first.",
@@ -318,7 +318,7 @@ export class GcsDriver implements StorageDriver {
 		});
 		if (res.status === 404) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`GCS object does not exist at path '${filePath}'`,
 				{ hint: "Confirm the bucket + key." },
 			);
@@ -399,7 +399,7 @@ export class GcsDriver implements StorageDriver {
 		});
 		if (res.status === 404) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`GCS copy source does not exist at path '${from}'`,
 				{ hint: "Confirm the source object was put() first." },
 			);

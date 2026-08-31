@@ -74,9 +74,9 @@ describe("LocalDriver", () => {
 	});
 
 	describe("getSignedUrl (HMAC)", () => {
-		it("throws ARCHIVE_SIGNING_DISABLED when no secret is configured", () => {
+		it("throws E_ARCHIVE_SIGNING_DISABLED when no secret is configured", () => {
 			expect(() => driver.getSignedUrl("file.txt")).toThrow(
-				expect.objectContaining({ code: "ARCHIVE_SIGNING_DISABLED" }),
+				expect.objectContaining({ code: "E_ARCHIVE_SIGNING_DISABLED" }),
 			);
 		});
 
@@ -133,7 +133,7 @@ describe("LocalDriver", () => {
 			});
 			expect(() =>
 				signed.getSignedUrl("x", { expiresIn: bad as number }),
-			).toThrow(expect.objectContaining({ code: "ARCHIVE_INVALID_EXPIRY" }));
+			).toThrow(expect.objectContaining({ code: "E_ARCHIVE_INVALID_EXPIRY" }));
 		});
 
 		it("produces different signatures for different paths (and same expiry)", () => {
@@ -165,9 +165,9 @@ describe("LocalDriver", () => {
 			expect(meta.mimeType).toBe("image/png");
 		});
 
-		it("getMetadata on a missing file throws ARCHIVE_NOT_FOUND", async () => {
+		it("getMetadata on a missing file throws E_ARCHIVE_NOT_FOUND", async () => {
 			await expect(driver.getMetadata("missing.txt")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 
@@ -193,10 +193,10 @@ describe("LocalDriver", () => {
 			expect(meta.visibility).toBe("private");
 		});
 
-		it("setVisibility on a missing file throws ARCHIVE_NOT_FOUND", async () => {
+		it("setVisibility on a missing file throws E_ARCHIVE_NOT_FOUND", async () => {
 			await expect(
 				driver.setVisibility("missing.txt", "private"),
-			).rejects.toMatchObject({ code: "ARCHIVE_NOT_FOUND" });
+			).rejects.toMatchObject({ code: "E_ARCHIVE_NOT_FOUND" });
 		});
 
 		it("delete removes the sidecar along with the main file", async () => {
@@ -227,11 +227,11 @@ describe("LocalDriver", () => {
 			expect(url).toMatch(/^\/storage\/cat\.txt\?exp=\d+&sig=[a-f0-9]{64}$/);
 		});
 
-		it("url on a private file with no signingSecret throws ARCHIVE_SIGNING_DISABLED", async () => {
+		it("url on a private file with no signingSecret throws E_ARCHIVE_SIGNING_DISABLED", async () => {
 			await driver.put("cat.txt", "meow");
 			await driver.setVisibility("cat.txt", "private");
 			await expect(driver.url("cat.txt")).rejects.toMatchObject({
-				code: "ARCHIVE_SIGNING_DISABLED",
+				code: "E_ARCHIVE_SIGNING_DISABLED",
 			});
 		});
 
@@ -268,9 +268,9 @@ describe("LocalDriver", () => {
 			expect(await driver.exists("deep/nested/path/file.txt")).toBe(true);
 		});
 
-		it("getStream on missing file throws ARCHIVE_NOT_FOUND", async () => {
+		it("getStream on missing file throws E_ARCHIVE_NOT_FOUND", async () => {
 			await expect(driver.getStream("never.txt")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 
@@ -321,9 +321,9 @@ describe("LocalDriver", () => {
 			expect((await driver.getMetadata("dst.txt")).visibility).toBe("public");
 		});
 
-		it("copy throws ARCHIVE_NOT_FOUND when source is missing", async () => {
+		it("copy throws E_ARCHIVE_NOT_FOUND when source is missing", async () => {
 			await expect(driver.copy("none.txt", "dst.txt")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 

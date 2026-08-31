@@ -158,12 +158,12 @@ export interface StorageDriver {
 	get(filePath: string): Promise<Buffer | null>;
 	/**
 	 * Contents as a `Uint8Array`. AdonisJS Drive parity. Throws
-	 * `ARCHIVE_NOT_FOUND` when the object is absent (unlike {@link get},
+	 * `E_ARCHIVE_NOT_FOUND` when the object is absent (unlike {@link get},
 	 * a byte accessor can't express absence as a value).
 	 */
 	getBytes(filePath: string): Promise<Uint8Array>;
 	/**
-	 * Download as a readable stream. Throws `ARCHIVE_NOT_FOUND` when
+	 * Download as a readable stream. Throws `E_ARCHIVE_NOT_FOUND` when
 	 * the object is missing — streams can't express absence as a value.
 	 */
 	getStream(filePath: string): Promise<NodeJS.ReadableStream>;
@@ -185,7 +185,7 @@ export interface StorageDriver {
 	 * Return a time-boxed URL that grants read access to `filePath`.
 	 * Implementations must validate `options.expiresIn` via
 	 * {@link assertValidExpiry} and reject out-of-range values with
-	 * `ARCHIVE_INVALID_EXPIRY`.
+	 * `E_ARCHIVE_INVALID_EXPIRY`.
 	 */
 	getSignedUrl(
 		filePath: string,
@@ -195,14 +195,14 @@ export interface StorageDriver {
 	 * Return a time-boxed URL that grants **write** (PUT) access, letting
 	 * a client upload directly to the backend. AdonisJS Drive parity.
 	 * Cloud-only — the LocalDriver has no presigned-upload equivalent and
-	 * throws `ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED`.
+	 * throws `E_ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED`.
 	 */
 	getSignedUploadUrl(
 		filePath: string,
 		options?: SignedUrlOptions,
 	): string | Promise<string>;
 	/**
-	 * Resolve object metadata. Throws `ArchiveError('ARCHIVE_NOT_FOUND', ...)`
+	 * Resolve object metadata. Throws `ArchiveError('E_ARCHIVE_NOT_FOUND', ...)`
 	 * when the object does not exist.
 	 */
 	getMetadata(filePath: string): Promise<Metadata>;
@@ -217,7 +217,7 @@ export interface StorageDriver {
 	 */
 	setVisibility(filePath: string, visibility: Visibility): Promise<void>;
 	/**
-	 * Duplicate an object. Throws `ARCHIVE_NOT_FOUND` if `from` is
+	 * Duplicate an object. Throws `E_ARCHIVE_NOT_FOUND` if `from` is
 	 * missing. Target is overwritten if it exists. Visibility is NOT
 	 * carried over unless `options.visibility` is passed — the new object
 	 * takes default visibility.
@@ -255,7 +255,7 @@ export interface LocalDriverOptions {
 	/**
 	 * HMAC-SHA256 secret used by {@link LocalDriver.getSignedUrl}.
 	 * When omitted, signing is disabled and `getSignedUrl` throws
-	 * `ARCHIVE_SIGNING_DISABLED`. The non-signing methods
+	 * `E_ARCHIVE_SIGNING_DISABLED`. The non-signing methods
 	 * (`put`/`get`/`delete`/`exists`/`url`) work either way.
 	 */
 	signingSecret?: string;
@@ -280,7 +280,7 @@ export class LocalDriver implements StorageDriver {
 			// values without being annoyingly strict about format.
 			if (typeof secret !== "string" || secret.length < 16) {
 				throw new ArchiveError(
-					"ARCHIVE_WEAK_SIGNING_SECRET",
+					"E_ARCHIVE_WEAK_SIGNING_SECRET",
 					`LocalDriver signingSecret must be a string of at least 16 chars (got length ${typeof secret === "string" ? secret.length : "non-string"})`,
 					{
 						hint: "Use a cryptographically random secret, e.g. `crypto.randomBytes(32).toString('hex')`.",
@@ -363,7 +363,7 @@ export class LocalDriver implements StorageDriver {
 		const buf = await this.get(filePath);
 		if (buf === null) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`File does not exist at path '${filePath}'`,
 				{ hint: "Confirm the path and that the file was put() first." },
 			);
@@ -398,7 +398,7 @@ export class LocalDriver implements StorageDriver {
 		const full = this.#safePath(filePath);
 		if (!fs.existsSync(full)) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`File does not exist at path '${filePath}'`,
 				{ hint: "Confirm the path and that the file was put() first." },
 			);
@@ -456,7 +456,7 @@ export class LocalDriver implements StorageDriver {
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code === "ENOENT") {
 				throw new ArchiveError(
-					"ARCHIVE_NOT_FOUND",
+					"E_ARCHIVE_NOT_FOUND",
 					`File does not exist at path '${filePath}'`,
 					{ hint: "Confirm the path and that the file was put() first." },
 				);
@@ -490,7 +490,7 @@ export class LocalDriver implements StorageDriver {
 		const full = this.#safePath(filePath);
 		if (!fs.existsSync(full)) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Cannot set visibility — file does not exist at path '${filePath}'`,
 				{ hint: "put() the file before calling setVisibility()." },
 			);
@@ -516,7 +516,7 @@ export class LocalDriver implements StorageDriver {
 			raw = fs.readFileSync(sidecar, "utf8");
 		} catch (err) {
 			throw new ArchiveError(
-				"ARCHIVE_VISIBILITY_CORRUPT",
+				"E_ARCHIVE_VISIBILITY_CORRUPT",
 				`Failed to read visibility sidecar for '${filePath}' (${(err as NodeJS.ErrnoException).code ?? "I/O error"}); refusing to default to 'public'.`,
 				{
 					hint: "Inspect the sidecar file or re-apply visibility via setVisibility().",
@@ -528,7 +528,7 @@ export class LocalDriver implements StorageDriver {
 			parsed = JSON.parse(raw) as { visibility?: unknown };
 		} catch {
 			throw new ArchiveError(
-				"ARCHIVE_VISIBILITY_CORRUPT",
+				"E_ARCHIVE_VISIBILITY_CORRUPT",
 				`Sidecar for '${filePath}' is not valid JSON; refusing to default to 'public'.`,
 				{
 					hint: "Delete the sidecar file and re-apply visibility via setVisibility().",
@@ -548,7 +548,7 @@ export class LocalDriver implements StorageDriver {
 		const secret = this.#signingSecret;
 		if (secret === null) {
 			throw new ArchiveError(
-				"ARCHIVE_SIGNING_DISABLED",
+				"E_ARCHIVE_SIGNING_DISABLED",
 				"LocalDriver.getSignedUrl requires a signingSecret at construction time",
 				{
 					hint: "Pass { signingSecret: <hex or random string> } to the LocalDriver constructor, or set config.archive.local.signingSecret. Private files require a signing secret.",
@@ -571,7 +571,7 @@ export class LocalDriver implements StorageDriver {
 	 */
 	getSignedUploadUrl(_filePath: string, _options?: SignedUrlOptions): string {
 		throw new ArchiveError(
-			"ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED",
+			"E_ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED",
 			"LocalDriver does not support presigned upload URLs",
 			{
 				hint: "Presigned uploads are an S3/GCS feature. For local storage, upload through your app's HTTP handler.",
@@ -592,7 +592,7 @@ export class LocalDriver implements StorageDriver {
 		const toFull = this.#safePath(to);
 		if (!fs.existsSync(fromFull)) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Cannot copy — source does not exist at path '${from}'`,
 				{ hint: "Confirm the source path was put() first." },
 			);
@@ -612,7 +612,7 @@ export class LocalDriver implements StorageDriver {
 		const toFull = this.#safePath(to);
 		if (!fs.existsSync(fromFull)) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`Cannot move — source does not exist at path '${from}'`,
 				{ hint: "Confirm the source path was put() first." },
 			);
@@ -655,7 +655,7 @@ export class LocalDriver implements StorageDriver {
 				);
 			} catch (err) {
 				throw new ArchiveError(
-					"ARCHIVE_VISIBILITY_MOVE_FAILED",
+					"E_ARCHIVE_VISIBILITY_MOVE_FAILED",
 					`move('${from}' -> '${to}'): main file moved but visibility sidecar write failed (${(err as NodeJS.ErrnoException).code ?? "unknown"}). Target visibility is undefined.`,
 					{
 						hint: "Re-apply visibility via setVisibility() on the target path.",
@@ -890,7 +890,7 @@ export class StorageManager {
 		return this.#driver.get(filePath);
 	}
 
-	/** Contents as a `Uint8Array`. Throws `ARCHIVE_NOT_FOUND` if absent. */
+	/** Contents as a `Uint8Array`. Throws `E_ARCHIVE_NOT_FOUND` if absent. */
 	getBytes(filePath: string): Promise<Uint8Array> {
 		return this.#driver.getBytes(filePath);
 	}

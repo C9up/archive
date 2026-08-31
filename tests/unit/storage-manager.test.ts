@@ -36,9 +36,9 @@ describe("archive > LocalDriver > stream + copy/move/list", () => {
 		expect(Buffer.concat(chunks).toString()).toBe("abcdefg");
 	});
 
-	it("getStream throws ARCHIVE_NOT_FOUND for a missing file", async () => {
+	it("getStream throws E_ARCHIVE_NOT_FOUND for a missing file", async () => {
 		await expect(driver.getStream("ghost.txt")).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 
@@ -50,9 +50,9 @@ describe("archive > LocalDriver > stream + copy/move/list", () => {
 		expect(meta.visibility).toBe("public"); // sidecar is intentionally NOT copied
 	});
 
-	it("copy throws ARCHIVE_NOT_FOUND when the source is missing", async () => {
+	it("copy throws E_ARCHIVE_NOT_FOUND when the source is missing", async () => {
 		await expect(driver.copy("missing.txt", "dest.txt")).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 
@@ -71,9 +71,9 @@ describe("archive > LocalDriver > stream + copy/move/list", () => {
 		expect(meta.visibility).toBe("private");
 	});
 
-	it("move throws ARCHIVE_NOT_FOUND when the source is missing", async () => {
+	it("move throws E_ARCHIVE_NOT_FOUND when the source is missing", async () => {
 		await expect(driver.move("ghost.txt", "dest.txt")).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 
@@ -121,15 +121,15 @@ describe("archive > LocalDriver > url() visibility-aware routing", () => {
 		expect(u).not.toMatch(/sig=/);
 	});
 
-	it("setVisibility on a missing file throws ARCHIVE_NOT_FOUND", async () => {
+	it("setVisibility on a missing file throws E_ARCHIVE_NOT_FOUND", async () => {
 		await expect(
 			driver.setVisibility("ghost.txt", "private"),
 		).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 
-	it("readVisibility THROWS ARCHIVE_VISIBILITY_CORRUPT on malformed JSON (no silent private→public downgrade)", async () => {
+	it("readVisibility THROWS E_ARCHIVE_VISIBILITY_CORRUPT on malformed JSON (no silent private→public downgrade)", async () => {
 		await driver.put("z.txt", "1");
 		await driver.setVisibility("z.txt", "private");
 		// Corrupt the sidecar to simulate disk damage / partial write.
@@ -138,12 +138,12 @@ describe("archive > LocalDriver > url() visibility-aware routing", () => {
 			"{not-json",
 		);
 		await expect(driver.getMetadata("z.txt")).rejects.toMatchObject({
-			code: "ARCHIVE_VISIBILITY_CORRUPT",
+			code: "E_ARCHIVE_VISIBILITY_CORRUPT",
 		});
 		// `url()` is the security-critical call site — must also refuse to
 		// serve rather than silently emit a public URL for the file.
 		await expect(driver.url("z.txt")).rejects.toMatchObject({
-			code: "ARCHIVE_VISIBILITY_CORRUPT",
+			code: "E_ARCHIVE_VISIBILITY_CORRUPT",
 		});
 	});
 
@@ -199,7 +199,7 @@ describe("archive > StorageManager > façade delegation", () => {
 });
 
 describe("archive > LocalDriver > signing-secret validation", () => {
-	it("rejects a too-short signingSecret with ARCHIVE_WEAK_SIGNING_SECRET", async () => {
+	it("rejects a too-short signingSecret with E_ARCHIVE_WEAK_SIGNING_SECRET", async () => {
 		const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "weak-sec-"));
 		try {
 			expect(() => new LocalDriver(dir, { signingSecret: "short" })).toThrow(

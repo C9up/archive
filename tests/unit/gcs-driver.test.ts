@@ -201,10 +201,10 @@ describe("GcsDriver", () => {
 			expect(meta.visibility).toBe("private");
 		});
 
-		it("getMetadata on 404 throws ARCHIVE_NOT_FOUND", async () => {
+		it("getMetadata on 404 throws E_ARCHIVE_NOT_FOUND", async () => {
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
 			await expect(driver.getMetadata("missing")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 
@@ -270,7 +270,7 @@ describe("GcsDriver", () => {
 		])("rejects out-of-range expiresIn (%s)", (bad) => {
 			expect(() =>
 				driver.getSignedUrl("x", { expiresIn: bad as number }),
-			).toThrow(expect.objectContaining({ code: "ARCHIVE_INVALID_EXPIRY" }));
+			).toThrow(expect.objectContaining({ code: "E_ARCHIVE_INVALID_EXPIRY" }));
 		});
 	});
 
@@ -301,10 +301,10 @@ describe("GcsDriver", () => {
 			expect(drained.equals(payload)).toBe(true);
 		});
 
-		it("getStream on 404 throws ARCHIVE_NOT_FOUND", async () => {
+		it("getStream on 404 throws E_ARCHIVE_NOT_FOUND", async () => {
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
 			await expect(driver.getStream("missing")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 	});
@@ -364,10 +364,10 @@ describe("GcsDriver", () => {
 			expect(headers.authorization).toBe("Bearer test-token");
 		});
 
-		it("copy 404 → ARCHIVE_NOT_FOUND", async () => {
+		it("copy 404 → E_ARCHIVE_NOT_FOUND", async () => {
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
 			await expect(driver.copy("none", "dst")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 
@@ -591,7 +591,7 @@ describe("GcsDriver > listing, deleting a prefix, and the rest", () => {
 
 		fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
 		await expect(driver.getBytes("a.txt")).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 

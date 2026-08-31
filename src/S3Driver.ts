@@ -91,7 +91,7 @@ export class S3Driver implements StorageDriver {
 		} catch (err) {
 			if (err instanceof Error && err.name === "TimeoutError") {
 				throw new ArchiveError(
-					"ARCHIVE_REQUEST_TIMEOUT",
+					"E_ARCHIVE_REQUEST_TIMEOUT",
 					`The storage provider did not answer within ${ms}ms.`,
 					{
 						hint: "Raise `requestTimeoutMs` for large objects, or check connectivity to the bucket.",
@@ -236,7 +236,7 @@ export class S3Driver implements StorageDriver {
 		const res = await this.#fetch(url, { method: "GET", headers });
 		if (res.status === 404) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`S3 object does not exist at path '${filePath}'`,
 				{
 					hint: "Confirm the bucket + key and that the object was put() first.",
@@ -273,7 +273,7 @@ export class S3Driver implements StorageDriver {
 		const res = await this.#fetch(url, { method: "GET", headers });
 		if (res.status === 404) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`S3 object does not exist at path '${filePath}'`,
 				{
 					hint: "Confirm the bucket + key and that the object was put() first.",
@@ -325,7 +325,7 @@ export class S3Driver implements StorageDriver {
 		});
 		if (headRes.status === 404) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`S3 object does not exist at path '${filePath}'`,
 				{
 					hint: "Confirm the bucket + key and that the object was put() first.",
@@ -394,7 +394,7 @@ export class S3Driver implements StorageDriver {
 		});
 		if (aclRes.status === 404) {
 			throw new ArchiveError(
-				"ARCHIVE_NOT_FOUND",
+				"E_ARCHIVE_NOT_FOUND",
 				`S3 object does not exist at path '${filePath}'`,
 				{ hint: "Confirm the bucket + key." },
 			);
@@ -547,7 +547,7 @@ export class S3Driver implements StorageDriver {
 			const body = await res.text();
 			if (/\bNoSuchKey\b/.test(body) || res.status === 404) {
 				throw new ArchiveError(
-					"ARCHIVE_NOT_FOUND",
+					"E_ARCHIVE_NOT_FOUND",
 					`S3 copy source does not exist at path '${from}'`,
 					{ hint: "Confirm the source object was put() first." },
 				);

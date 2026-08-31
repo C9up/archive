@@ -68,7 +68,7 @@ describe("ArchiveProvider", () => {
 		});
 		new ArchiveProvider(app).register();
 		const manager = await app.container.resolve<StorageManager>(StorageManager);
-		// Pre-fix: signingSecret never reached the LocalDriver → ARCHIVE_SIGNING_DISABLED.
+		// Pre-fix: signingSecret never reached the LocalDriver → E_ARCHIVE_SIGNING_DISABLED.
 		const url = await manager.getSignedUrl("foo.txt");
 		expect(typeof url).toBe("string");
 		expect(url).toContain("foo.txt");
@@ -82,25 +82,25 @@ describe("ArchiveProvider", () => {
 		).resolves.toBeInstanceOf(StorageManager);
 	});
 
-	it("throws ARCHIVE_CONFIG_MISSING when driver is 's3' but config.s3 is absent", async () => {
+	it("throws E_ARCHIVE_CONFIG_MISSING when driver is 's3' but config.s3 is absent", async () => {
 		const app = buildApp({ archive: { driver: "s3" } });
 		new ArchiveProvider(app).register();
 
 		await expect(
 			app.container.resolve<StorageManager>(StorageManager),
 		).rejects.toThrow(
-			expect.objectContaining({ code: "ARCHIVE_CONFIG_MISSING" }),
+			expect.objectContaining({ code: "E_ARCHIVE_CONFIG_MISSING" }),
 		);
 	});
 
-	it("throws ARCHIVE_INVALID_DRIVER on an unknown driver string", async () => {
+	it("throws E_ARCHIVE_INVALID_DRIVER on an unknown driver string", async () => {
 		const app = buildApp({ archive: { driver: "locla" } });
 		new ArchiveProvider(app).register();
 
 		await expect(
 			app.container.resolve<StorageManager>(StorageManager),
 		).rejects.toThrow(
-			expect.objectContaining({ code: "ARCHIVE_INVALID_DRIVER" }),
+			expect.objectContaining({ code: "E_ARCHIVE_INVALID_DRIVER" }),
 		);
 	});
 
@@ -137,23 +137,23 @@ describe("ArchiveProvider", () => {
 		expect(S3Driver).toBeDefined();
 	});
 
-	it("boot() eagerly throws ARCHIVE_INVALID_DRIVER on a misspelled driver name", async () => {
+	it("boot() eagerly throws E_ARCHIVE_INVALID_DRIVER on a misspelled driver name", async () => {
 		const app = buildApp({ archive: { driver: "locla" } });
 		const provider = new ArchiveProvider(app);
 		provider.register();
 
 		await expect(provider.boot()).rejects.toThrow(
-			expect.objectContaining({ code: "ARCHIVE_INVALID_DRIVER" }),
+			expect.objectContaining({ code: "E_ARCHIVE_INVALID_DRIVER" }),
 		);
 	});
 
-	it("boot() eagerly throws ARCHIVE_CONFIG_MISSING when driver-specific block is absent", async () => {
+	it("boot() eagerly throws E_ARCHIVE_CONFIG_MISSING when driver-specific block is absent", async () => {
 		const app = buildApp({ archive: { driver: "s3" } });
 		const provider = new ArchiveProvider(app);
 		provider.register();
 
 		await expect(provider.boot()).rejects.toThrow(
-			expect.objectContaining({ code: "ARCHIVE_CONFIG_MISSING" }),
+			expect.objectContaining({ code: "E_ARCHIVE_CONFIG_MISSING" }),
 		);
 	});
 

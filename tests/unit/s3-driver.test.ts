@@ -129,7 +129,7 @@ describe("S3Driver", () => {
 		])("rejects out-of-range expiresIn (%s)", (bad) => {
 			expect(() =>
 				driver.getSignedUrl("file", { expiresIn: bad as number }),
-			).toThrow(expect.objectContaining({ code: "ARCHIVE_INVALID_EXPIRY" }));
+			).toThrow(expect.objectContaining({ code: "E_ARCHIVE_INVALID_EXPIRY" }));
 		});
 
 		it("encodes special characters in the path", () => {
@@ -199,10 +199,10 @@ describe("S3Driver", () => {
 			expect(meta.visibility).toBe("private");
 		});
 
-		it("getMetadata on 404 HEAD throws ARCHIVE_NOT_FOUND", async () => {
+		it("getMetadata on 404 HEAD throws E_ARCHIVE_NOT_FOUND", async () => {
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
 			await expect(driver.getMetadata("missing")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 
@@ -398,10 +398,10 @@ describe("S3Driver", () => {
 			expect(drained.equals(payload)).toBe(true);
 		});
 
-		it("getStream on 404 throws ARCHIVE_NOT_FOUND", async () => {
+		it("getStream on 404 throws E_ARCHIVE_NOT_FOUND", async () => {
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
 			await expect(driver.getStream("missing")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 
@@ -434,14 +434,14 @@ describe("S3Driver", () => {
 			expect(headers.authorization).toMatch(/^AWS4-HMAC-SHA256 /);
 		});
 
-		it("copy throws ARCHIVE_NOT_FOUND when the source is reported as NoSuchKey", async () => {
+		it("copy throws E_ARCHIVE_NOT_FOUND when the source is reported as NoSuchKey", async () => {
 			fetchSpy.mockResolvedValueOnce(
 				new Response("<Error><Code>NoSuchKey</Code></Error>", {
 					status: 404,
 				}),
 			);
 			await expect(driver.copy("nope", "dst")).rejects.toMatchObject({
-				code: "ARCHIVE_NOT_FOUND",
+				code: "E_ARCHIVE_NOT_FOUND",
 			});
 		});
 
@@ -759,7 +759,7 @@ describe("S3Driver > move and getBytes", () => {
 		fetchSpy.mockResolvedValueOnce(new Response("", { status: 404 }));
 
 		await expect(driver.getBytes("a.txt")).rejects.toMatchObject({
-			code: "ARCHIVE_NOT_FOUND",
+			code: "E_ARCHIVE_NOT_FOUND",
 		});
 	});
 });
