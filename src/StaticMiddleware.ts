@@ -164,10 +164,30 @@ export class StaticMiddleware {
 			return;
 		}
 
-		// Read the canonicalised path — closes the symlink TOCTOU window
-		// between the realpath check above and the read. `filePath` could
-		// resolve through a symlink that was swapped after we validated it.
-		const content = await fsp.readFile(realPath);
+		// Opened with O_NOFOLLOW rather than read by name.
+		//
+		// Reading the canonicalised path narrowed the window but did not close
+		// it: between `realpath` and the read, the last component of that path
+		// can be replaced by a symlink pointing anywhere, and a read by name
+		// follows it. Refusing to follow a link at open time takes the swap off
+		// the table — the open fails instead of serving a file outside the root.
+		//
+		// A parent directory swapped in the same window is not covered; that
+		// needs openat-relative-to-a-descriptor, which Node does not expose.
+		let content: Buffer;
+		try {
+			const handle = await fsp.open(
+				realPath,
+				fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
+			);
+			try {
+				content = await handle.readFile();
+			} finally {
+				await handle.close();
+			}
+		} catch {
+			return next();
+		}
 		// Send the raw Buffer — NOT content.toString() which would destroy binary
 		// data (PNG, PDF, ZIP, etc.) by interpreting it as UTF-8.
 		ctx.response.status(200).sendBuffer(content);

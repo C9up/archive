@@ -60,6 +60,29 @@ describe("StaticMiddleware", () => {
 		fs.rmSync(root, { recursive: true, force: true });
 	});
 
+	it("does not serve a symlink pointing outside the root", async () => {
+		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "archive-secret-"));
+		try {
+			fs.writeFileSync(path.join(outside, "secret.txt"), "SECRET");
+			fs.symlinkSync(
+				path.join(outside, "secret.txt"),
+				path.join(root, "public.txt"),
+			);
+			const { ctx, response } = makeCtx("GET", "/static/public.txt");
+			const next = vi.fn<() => Promise<void>>(async () => {});
+
+			await middleware.handle(ctx, next);
+
+			// The request falls through rather than sending what the link points
+			// at — and the read now refuses to follow a link at open time, so a
+			// link swapped in after the check cannot be served either.
+			expect(next).toHaveBeenCalled();
+			expect(response.sendBuffer).not.toHaveBeenCalled();
+		} finally {
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
 	it("serves an existing file with content-type, ETag, and cache-control", async () => {
 		fs.writeFileSync(path.join(root, "hello.txt"), "hi");
 		const { ctx, response } = makeCtx("GET", "/static/hello.txt");
