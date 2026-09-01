@@ -31,7 +31,7 @@ import {
 	type StorageDriver,
 	StorageManager,
 } from "./StorageManager.js";
-import { setStorage } from "./services/main.js";
+import { setStorage, setStorageResolver } from "./services/main.js";
 
 interface ArchiveContainer {
 	singleton(token: unknown, factory: () => unknown): void;
@@ -85,16 +85,27 @@ export default class ArchiveProvider {
 	}
 
 	async boot(): Promise<void> {
-		// Skip eager resolution when archive is unconfigured: an app that
-		// registers this provider but never uses storage should not trigger
-		// LocalDriver's mkdirSync of './storage' at boot (breaks on
-		// read-only rootfs). Explicit (object-shaped) configs still resolve.
+		// No eager resolution when archive is unconfigured: an app that registers
+		// this provider and never uses storage should not trigger LocalDriver's
+		// mkdirSync of './storage' at boot, which fails on a read-only rootfs.
+		//
+		// But returning here left the two ways in disagreeing: the container
+		// still served `storage` from the default config, while the service
+		// accessor threw "before boot". Same provider, same application, two
+		// answers. It gets a resolver instead — nothing is constructed until
+		// something genuinely reaches for storage, and then both paths give the
+		// same manager.
 		const archive = this.app.config.get<ArchiveConfig | DriveConfig>("archive");
 		if (
 			archive === undefined ||
 			archive === null ||
 			typeof archive !== "object"
 		) {
+			// Built the way the container's own factory builds it, so the two
+			// cannot drift — and synchronously, because the accessor is.
+			setStorageResolver(() =>
+				new DriveManager(resolveDriveConfig(archive)).use(),
+			);
 			return;
 		}
 		const manager =

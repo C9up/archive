@@ -13,10 +13,27 @@
 import type { StorageManager } from "../StorageManager.js";
 
 let instance: StorageManager | undefined;
+let resolve: (() => StorageManager) | undefined;
 
 /** @internal Bind the singleton (called by ArchiveProvider). */
 export function setStorage(value: StorageManager): void {
 	instance = value;
+	resolve = undefined;
+}
+
+/**
+ * @internal Bind a way to build the singleton on first genuine use.
+ *
+ * For the unconfigured case, where building it at boot would create
+ * `./storage` for an application that may never touch storage — and fail
+ * outright on a read-only rootfs. Skipping it entirely left the container
+ * serving `storage` while this accessor threw "before boot": the same
+ * application, two answers. Nothing is built until something reaches for it,
+ * and then both paths give the same manager.
+ */
+export function setStorageResolver(factory: () => StorageManager): void {
+	if (instance !== undefined) return;
+	resolve = factory;
 }
 
 /** @internal Read the singleton (or `undefined` pre-boot). */
@@ -34,6 +51,10 @@ const storage: StorageManager = new Proxy({} as StorageManager, {
 		// so answer undefined and let a genuine access be the one that reports.
 		if (typeof prop === "symbol" || prop === "then") {
 			return undefined;
+		}
+		if (instance === undefined && resolve !== undefined) {
+			instance = resolve();
+			resolve = undefined;
 		}
 		if (!instance) {
 			throw new Error(

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ArchiveAppContext } from "../../src/ArchiveProvider.js";
 import ArchiveProvider from "../../src/ArchiveProvider.js";
 import { services } from "../../src/DriveManager.js";
@@ -218,5 +218,47 @@ describe("ArchiveProvider > the multi-disk bindings", () => {
 		await expect(provider.start()).resolves.toBeUndefined();
 		await expect(provider.ready()).resolves.toBeUndefined();
 		await expect(provider.shutdown()).resolves.toBeUndefined();
+	});
+});
+
+describe("ArchiveProvider > the two ways in agree", () => {
+	it("serves the accessor from the same default the container uses", async () => {
+		// A fresh module registry: the accessor holds a module-level singleton,
+		// and an earlier test in this file has already populated it.
+		vi.resetModules();
+		const { default: ProviderFresh } = await import(
+			"../../src/ArchiveProvider.js"
+		);
+		const { default: storage, getStorage } = await import(
+			"../../src/services/main.js"
+		);
+
+		// No `archive` block. Booting returned early — nothing built, on purpose,
+		// because building it creates ./storage and that fails on a read-only
+		// rootfs. But the container still served `storage` from the default
+		// config while the accessor threw "before boot": one application, two
+		// answers.
+		const provider = new ProviderFresh(buildApp({}));
+		provider.register();
+		await provider.boot();
+
+		// Still nothing built — the reason for the early return survives.
+		expect(getStorage()).toBeUndefined();
+
+		// And a genuine access now works instead of throwing.
+		expect(typeof storage.put).toBe("function");
+		expect(getStorage()).toBeDefined();
+	});
+
+	it("leaves an explicit config resolving eagerly, as before", async () => {
+		const app = buildApp({
+			archive: { driver: "local", local: { root: "./tmp-storage-eager" } },
+		});
+		const provider = new ArchiveProvider(app);
+		provider.register();
+		await provider.boot();
+
+		const { getStorage } = await import("../../src/services/main.js");
+		expect(getStorage()).toBeDefined();
 	});
 });
