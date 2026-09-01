@@ -571,7 +571,24 @@ export class LocalDriver implements StorageDriver {
 				},
 			);
 		}
-		return parsed.visibility === "private" ? "private" : "public";
+		// Fail CLOSED on anything that is not exactly one of the two values.
+		//
+		// `=== "private" ? "private" : "public"` treated every other input as
+		// public, so a sidecar holding `{}`, `{"visibility":"PRIVATE"}` or a
+		// truncated write silently downgraded a private file — `url()` then
+		// handed out `/storage/<path>` instead of a signed URL. The doc comment
+		// above already promised this for unparseable JSON; a JSON document
+		// that parses and says nothing usable is the same situation.
+		if (parsed.visibility === "private" || parsed.visibility === "public") {
+			return parsed.visibility;
+		}
+		throw new ArchiveError(
+			"E_ARCHIVE_VISIBILITY_CORRUPT",
+			`Sidecar for '${filePath}' carries no usable visibility (${JSON.stringify(parsed.visibility)}); refusing to default to 'public'.`,
+			{
+				hint: "Delete the sidecar file and re-apply visibility via setVisibility().",
+			},
+		);
 	}
 
 	getSignedUrl(filePath: string, options?: SignedUrlOptions): string {

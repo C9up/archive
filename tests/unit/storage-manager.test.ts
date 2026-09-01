@@ -147,6 +147,47 @@ describe("archive > LocalDriver > url() visibility-aware routing", () => {
 		});
 	});
 
+	it("refuses a sidecar that parses but says nothing usable (no fail-open)", async () => {
+		// The JSON-parse guard above only covered a document that will not
+		// parse. One that parses and carries no usable value took the `: "public"`
+		// side of a ternary, so a tampered or truncated sidecar downgraded a
+		// private file in silence — and `url()` then handed out an unsigned
+		// /storage/ URL for it.
+		await driver.put("w.txt", "1");
+		await driver.setVisibility("w.txt", "private");
+		const sidecar = path.join(root, "w.txt.archive-visibility.json");
+
+		for (const body of [
+			"{}",
+			'{"visibility":"PRIVATE"}',
+			'{"visibility":null}',
+			'{"visibility":"privat"}',
+			'{"visibility":true}',
+			'{"visibility":{"nested":"private"}}',
+			"[]",
+			'"private"',
+		]) {
+			await fsp.writeFile(sidecar, body);
+			await expect(driver.getVisibility("w.txt"), body).rejects.toMatchObject({
+				code: "E_ARCHIVE_VISIBILITY_CORRUPT",
+			});
+			// The security-critical call site: it must refuse rather than emit a
+			// public URL for a file whose visibility it cannot determine.
+			await expect(driver.url("w.txt"), body).rejects.toMatchObject({
+				code: "E_ARCHIVE_VISIBILITY_CORRUPT",
+			});
+		}
+	});
+
+	it("accepts an explicit 'public' sidecar as public", async () => {
+		// Failing closed must not mean refusing the value that IS valid.
+		await driver.put("p.txt", "1");
+		await driver.setVisibility("p.txt", "public");
+		expect(await driver.getVisibility("p.txt")).toBe("public");
+		await driver.setVisibility("p.txt", "private");
+		expect(await driver.getVisibility("p.txt")).toBe("private");
+	});
+
 	it("readVisibility still returns 'public' when the sidecar is simply absent (documented default)", async () => {
 		await driver.put("nosidecar.txt", "1");
 		const meta = await driver.getMetadata("nosidecar.txt");
