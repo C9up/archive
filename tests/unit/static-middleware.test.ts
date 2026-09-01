@@ -133,6 +133,39 @@ describe("StaticMiddleware", () => {
 		expect(response.sendBuffer).not.toHaveBeenCalled();
 	});
 
+	it("sends a quoted, weak ETag and matches a list weakly", async () => {
+		fs.writeFileSync(path.join(root, "b.css"), "body{}");
+		const first = makeCtx("GET", "/static/b.css");
+		await middleware.handle(first.ctx, vi.fn());
+		const etagCall = first.response.header.mock.calls.find(
+			(call: unknown[]) => call[0] === "ETag",
+		);
+		const etag = String(etagCall?.[1]);
+
+		// RFC 9110 §8.8.3 — an entity-tag is a quoted string. The bare md5 hex
+		// this used to send is not one, and a strict cache may ignore it.
+		expect(etag).toMatch(/^W\/"[0-9a-f]+-[0-9a-f]+"$/);
+
+		// §13.1.2 — a list, compared weakly: the strong spelling of a weak tag
+		// matches, and so does a tag that is not first.
+		const { ctx, response } = makeCtx("GET", "/static/b.css", {
+			"if-none-match": `"nope", ${etag.replace(/^W\//, "")}`,
+		});
+		await middleware.handle(ctx, vi.fn());
+		expect(response.status).toHaveBeenCalledWith(304);
+		expect(response.sendBuffer).not.toHaveBeenCalled();
+	});
+
+	it("answers 304 for If-None-Match: *", async () => {
+		fs.writeFileSync(path.join(root, "c.css"), "body{}");
+		const { ctx, response } = makeCtx("GET", "/static/c.css", {
+			"if-none-match": "*",
+		});
+		await middleware.handle(ctx, vi.fn());
+		expect(response.status).toHaveBeenCalledWith(304);
+		expect(response.sendBuffer).not.toHaveBeenCalled();
+	});
+
 	it("falls through when the URL prefix does not match (prefix-sibling safety)", async () => {
 		const { ctx, response } = makeCtx("GET", "/staticx/evil.css");
 		const next = vi.fn<() => Promise<void>>(async () => {});

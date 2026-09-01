@@ -6,6 +6,7 @@
 
 import { createHash, createHmac } from "node:crypto";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import * as url from "node:url";
@@ -265,6 +266,14 @@ export class LocalDriver implements StorageDriver {
 	#root: string;
 	#signingSecret: string | null;
 
+	/**
+	 * The only synchronous filesystem access left in this driver, and the only
+	 * one that cannot be anything else: a constructor cannot await. It runs
+	 * once, at boot, before the server is serving. Every method below is
+	 * asynchronous — they used to be async signatures over `writeFileSync` /
+	 * `readFileSync`, so a large upload or download stalled every other
+	 * request in the process for its whole duration.
+	 */
 	constructor(root: string, options?: LocalDriverOptions) {
 		const resolved = path.resolve(root);
 		if (!fs.existsSync(resolved)) {
@@ -292,16 +301,16 @@ export class LocalDriver implements StorageDriver {
 	}
 
 	/**
-	 * Resolve and validate a file path — prevents traversal outside
-	 * the root, INCLUDING via symlinks planted inside the root.
+	 * The half of the guard that touches nothing: control characters and
+	 * lexical containment.
 	 *
-	 * For existing files the check walks `fs.realpathSync(full)` to
-	 * defeat symlink redirection. For new writes (target doesn't exist
-	 * yet) we walk the nearest existing ancestor via `realpathSync` so
-	 * an attacker who planted a symlink at `<root>/evil -> /etc`
-	 * cannot redirect a put through it.
+	 * Split out because `getSignedUrl` is synchronous in the driver contract
+	 * and cannot await the symlink walk. Keeping ONE implementation of each
+	 * half — rather than a sync copy of the whole check beside an async one —
+	 * is what stops the two from drifting apart, which for a containment guard
+	 * is the failure that matters.
 	 */
-	#safePath(filePath: string): string {
+	#lexicalPath(filePath: string): string {
 		// Reject control chars that would smuggle HMAC delimiters or
 		// confuse path handling. `\n` (10) is the signing payload
 		// separator — a filename containing `\n` could otherwise forge
@@ -315,30 +324,50 @@ export class LocalDriver implements StorageDriver {
 			}
 		}
 		const full = path.resolve(this.#root, filePath);
-		// Lexical guard first — cheap and covers the `..` case.
+		// Lexical guard — cheap and covers the `..` case.
 		if (!full.startsWith(this.#root + path.sep) && full !== this.#root) {
 			throw new Error(
 				`Path traversal blocked: '${filePath}' resolves outside storage root`,
 			);
 		}
+		return full;
+	}
+
+	/**
+	 * Resolve and validate a file path — prevents traversal outside
+	 * the root, INCLUDING via symlinks planted inside the root.
+	 *
+	 * For existing files the check walks `realpath(full)` to defeat symlink
+	 * redirection. For new writes (target doesn't exist yet) we walk the
+	 * nearest existing ancestor so an attacker who planted a symlink at
+	 * `<root>/evil -> /etc` cannot redirect a put through it.
+	 */
+	async #safePath(filePath: string): Promise<string> {
+		const full = this.#lexicalPath(filePath);
 		// Realpath guard — walk up to the nearest existing ancestor and
 		// confirm its canonical form is still under root.
 		let probe = full;
-		while (!fs.existsSync(probe)) {
-			const parent = path.dirname(probe);
-			if (parent === probe) break;
-			probe = parent;
+		for (;;) {
+			try {
+				const realProbe = await fsp.realpath(probe);
+				if (
+					!realProbe.startsWith(this.#root + path.sep) &&
+					realProbe !== this.#root
+				) {
+					throw new Error(
+						`Path traversal blocked: '${filePath}' resolves outside storage root via symlink`,
+					);
+				}
+				return full;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+				const parent = path.dirname(probe);
+				// The root itself is canonicalised at construction, so the walk
+				// always terminates at something that resolves.
+				if (parent === probe) return full;
+				probe = parent;
+			}
 		}
-		const realProbe = fs.realpathSync(probe);
-		if (
-			!realProbe.startsWith(this.#root + path.sep) &&
-			realProbe !== this.#root
-		) {
-			throw new Error(
-				`Path traversal blocked: '${filePath}' resolves outside storage root via symlink`,
-			);
-		}
-		return full;
 	}
 
 	async put(
@@ -346,12 +375,9 @@ export class LocalDriver implements StorageDriver {
 		content: Buffer | string,
 		options?: WriteOptions,
 	): Promise<void> {
-		const full = this.#safePath(filePath);
-		const dir = path.dirname(full);
-		if (!fs.existsSync(dir)) {
-			fs.mkdirSync(dir, { recursive: true });
-		}
-		fs.writeFileSync(full, content);
+		const full = await this.#safePath(filePath);
+		await fsp.mkdir(path.dirname(full), { recursive: true });
+		await fsp.writeFile(full, content);
 		// Only `visibility` has a filesystem-equivalent (the sidecar).
 		// contentType/cacheControl/... have no local meaning.
 		if (options?.visibility !== undefined) {
@@ -378,25 +404,28 @@ export class LocalDriver implements StorageDriver {
 		// getMetadata) and contentLength (FS knows its own size).
 		_options?: PutStreamOptions,
 	): Promise<void> {
-		const full = this.#safePath(filePath);
-		const dir = path.dirname(full);
-		if (!fs.existsSync(dir)) {
-			fs.mkdirSync(dir, { recursive: true });
-		}
+		const full = await this.#safePath(filePath);
+		await fsp.mkdir(path.dirname(full), { recursive: true });
 		// `pipeline` propagates errors and destroys the write target on
 		// failure — no manual cleanup needed.
 		await pipeline(readable, fs.createWriteStream(full));
 	}
 
 	async get(filePath: string): Promise<Buffer | null> {
-		const full = this.#safePath(filePath);
-		if (!fs.existsSync(full)) return null;
-		return fs.readFileSync(full);
+		const full = await this.#safePath(filePath);
+		try {
+			return await fsp.readFile(full);
+		} catch (err) {
+			// One syscall instead of exists-then-read: the pair also answered
+			// `null` for a file that was deleted between the two.
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+			throw err;
+		}
 	}
 
 	async getStream(filePath: string): Promise<NodeJS.ReadableStream> {
-		const full = this.#safePath(filePath);
-		if (!fs.existsSync(full)) {
+		const full = await this.#safePath(filePath);
+		if (!(await exists(full))) {
 			throw new ArchiveError(
 				"E_ARCHIVE_NOT_FOUND",
 				`File does not exist at path '${filePath}'`,
@@ -407,16 +436,20 @@ export class LocalDriver implements StorageDriver {
 	}
 
 	async delete(filePath: string): Promise<boolean> {
-		const full = this.#safePath(filePath);
-		if (!fs.existsSync(full)) return false;
-		fs.unlinkSync(full);
+		const full = await this.#safePath(filePath);
+		try {
+			await fsp.unlink(full);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+			throw err;
+		}
 		// Sidecar cleanup is best-effort. The main file is already gone
 		// — any sidecar failure (ENOENT, EACCES, EPERM) would corrupt
 		// the `delete` contract if we threw here (caller would see a
 		// rejected Promise AFTER the file was already deleted).
 		const sidecar = full + VISIBILITY_SIDECAR_SUFFIX;
 		try {
-			fs.unlinkSync(sidecar);
+			await fsp.unlink(sidecar);
 		} catch {
 			// swallow: cleanup is best-effort.
 		}
@@ -427,7 +460,7 @@ export class LocalDriver implements StorageDriver {
 		// Sidecars are an implementation detail — pretend they don't
 		// exist from the public API's point of view.
 		if (filePath.endsWith(VISIBILITY_SIDECAR_SUFFIX)) return false;
-		return fs.existsSync(this.#safePath(filePath));
+		return exists(await this.#safePath(filePath));
 	}
 
 	publicUrl(filePath: string): string {
@@ -443,16 +476,16 @@ export class LocalDriver implements StorageDriver {
 	}
 
 	async url(filePath: string): Promise<string> {
-		const visibility = this.#readVisibility(filePath);
+		const visibility = await this.#readVisibility(filePath);
 		if (visibility === "public") return this.publicUrl(filePath);
 		return this.getSignedUrl(filePath);
 	}
 
 	async getMetadata(filePath: string): Promise<Metadata> {
-		const full = this.#safePath(filePath);
+		const full = await this.#safePath(filePath);
 		let stat: fs.Stats;
 		try {
-			stat = fs.statSync(full);
+			stat = await fsp.stat(full);
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code === "ENOENT") {
 				throw new ArchiveError(
@@ -478,7 +511,7 @@ export class LocalDriver implements StorageDriver {
 			contentType: mimeType,
 			lastModified: stat.mtime,
 			etag: `W/"${etagBody}"`,
-			visibility: this.#readVisibility(filePath),
+			visibility: await this.#readVisibility(filePath),
 		};
 	}
 
@@ -487,8 +520,8 @@ export class LocalDriver implements StorageDriver {
 	}
 
 	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
-		const full = this.#safePath(filePath);
-		if (!fs.existsSync(full)) {
+		const full = await this.#safePath(filePath);
+		if (!(await exists(full))) {
 			throw new ArchiveError(
 				"E_ARCHIVE_NOT_FOUND",
 				`Cannot set visibility — file does not exist at path '${filePath}'`,
@@ -496,7 +529,7 @@ export class LocalDriver implements StorageDriver {
 			);
 		}
 		const sidecar = full + VISIBILITY_SIDECAR_SUFFIX;
-		fs.writeFileSync(sidecar, JSON.stringify({ visibility }), { flag: "w" });
+		await fsp.writeFile(sidecar, JSON.stringify({ visibility }), { flag: "w" });
 	}
 
 	/**
@@ -508,13 +541,16 @@ export class LocalDriver implements StorageDriver {
 	 *     blip into a private→public downgrade for an existing private file.
 	 *     Refuse to serve undetermined visibility instead.
 	 */
-	#readVisibility(filePath: string): Visibility {
-		const sidecar = this.#safePath(filePath) + VISIBILITY_SIDECAR_SUFFIX;
-		if (!fs.existsSync(sidecar)) return "public";
+	async #readVisibility(filePath: string): Promise<Visibility> {
+		const sidecar =
+			(await this.#safePath(filePath)) + VISIBILITY_SIDECAR_SUFFIX;
 		let raw: string;
 		try {
-			raw = fs.readFileSync(sidecar, "utf8");
+			raw = await fsp.readFile(sidecar, "utf8");
 		} catch (err) {
+			// Absent sidecar is the documented default, and it is the common
+			// case: one syscall answers both that and a real read failure.
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") return "public";
 			throw new ArchiveError(
 				"E_ARCHIVE_VISIBILITY_CORRUPT",
 				`Failed to read visibility sidecar for '${filePath}' (${(err as NodeJS.ErrnoException).code ?? "I/O error"}); refusing to default to 'public'.`,
@@ -542,7 +578,14 @@ export class LocalDriver implements StorageDriver {
 		// Fail fast on unsafe paths instead of producing a signed URL that
 		// can never be served — `storage.get()` would reject it later via
 		// `#safePath`, but signing-time errors are easier to diagnose.
-		this.#safePath(filePath);
+		//
+		// The lexical half only: this method is synchronous in the driver
+		// contract and cannot await the symlink walk. Nothing is lost, because
+		// signing a URL reads no file — the read it leads to goes through the
+		// full check. What must NOT be skipped here is the control-character
+		// rejection, since `\n` is this signature's own payload separator, and
+		// `#lexicalPath` is where that lives.
+		this.#lexicalPath(filePath);
 		const expiresIn = parseExpiry(options?.expiresIn ?? DEFAULT_EXPIRES_IN);
 		assertValidExpiry(expiresIn);
 		const secret = this.#signingSecret;
@@ -588,18 +631,17 @@ export class LocalDriver implements StorageDriver {
 	}
 
 	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
-		const fromFull = this.#safePath(from);
-		const toFull = this.#safePath(to);
-		if (!fs.existsSync(fromFull)) {
+		const fromFull = await this.#safePath(from);
+		const toFull = await this.#safePath(to);
+		if (!(await exists(fromFull))) {
 			throw new ArchiveError(
 				"E_ARCHIVE_NOT_FOUND",
 				`Cannot copy — source does not exist at path '${from}'`,
 				{ hint: "Confirm the source path was put() first." },
 			);
 		}
-		const dir = path.dirname(toFull);
-		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-		fs.copyFileSync(fromFull, toFull);
+		await fsp.mkdir(path.dirname(toFull), { recursive: true });
+		await fsp.copyFile(fromFull, toFull);
 		// Intentionally do NOT copy the visibility sidecar — new object
 		// takes default visibility unless the caller asks otherwise.
 		if (options?.visibility !== undefined) {
@@ -608,9 +650,9 @@ export class LocalDriver implements StorageDriver {
 	}
 
 	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
-		const fromFull = this.#safePath(from);
-		const toFull = this.#safePath(to);
-		if (!fs.existsSync(fromFull)) {
+		const fromFull = await this.#safePath(from);
+		const toFull = await this.#safePath(to);
+		if (!(await exists(fromFull))) {
 			throw new ArchiveError(
 				"E_ARCHIVE_NOT_FOUND",
 				`Cannot move — source does not exist at path '${from}'`,
@@ -624,20 +666,19 @@ export class LocalDriver implements StorageDriver {
 		// corruption, which surfaces here BEFORE we mutate anything.
 		const fromSidecar = fromFull + VISIBILITY_SIDECAR_SUFFIX;
 		const toSidecar = toFull + VISIBILITY_SIDECAR_SUFFIX;
-		const capturedVisibility: Visibility | undefined = fs.existsSync(
+		const capturedVisibility: Visibility | undefined = (await exists(
 			fromSidecar,
-		)
-			? this.#readVisibility(from)
+		))
+			? await this.#readVisibility(from)
 			: undefined;
-		const dir = path.dirname(toFull);
-		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		await fsp.mkdir(path.dirname(toFull), { recursive: true });
 		try {
-			fs.renameSync(fromFull, toFull);
+			await fsp.rename(fromFull, toFull);
 		} catch (err) {
 			// Cross-device rename — fall back to copy+unlink.
 			if ((err as NodeJS.ErrnoException).code === "EXDEV") {
-				fs.copyFileSync(fromFull, toFull);
-				fs.unlinkSync(fromFull);
+				await fsp.copyFile(fromFull, toFull);
+				await fsp.unlink(fromFull);
 			} else {
 				throw err;
 			}
@@ -648,7 +689,7 @@ export class LocalDriver implements StorageDriver {
 		// Public is the default, so an absent source sidecar means no work.
 		if (capturedVisibility !== undefined) {
 			try {
-				fs.writeFileSync(
+				await fsp.writeFile(
 					toSidecar,
 					JSON.stringify({ visibility: capturedVisibility }),
 					{ flag: "w" },
@@ -665,12 +706,10 @@ export class LocalDriver implements StorageDriver {
 			// Best-effort cleanup of the source sidecar — visibility is already
 			// preserved on the target side. A failure here leaves a stale
 			// sidecar pointing at the now-missing source file; benign.
-			if (fs.existsSync(fromSidecar)) {
-				try {
-					fs.unlinkSync(fromSidecar);
-				} catch {
-					// benign — source dir may be cleaned up by later operations.
-				}
+			try {
+				await fsp.unlink(fromSidecar);
+			} catch {
+				// benign — source dir may be cleaned up by later operations.
 			}
 		}
 		// An explicit visibility override wins over the preserved value.
@@ -691,12 +730,12 @@ export class LocalDriver implements StorageDriver {
 		}
 		// Prune the prefix directory itself when it is now empty, mirroring
 		// flydrive's "the folder is deleted" behaviour. Best-effort.
-		const dir = this.#safePath(prefix);
-		if (dir !== this.#root && fs.existsSync(dir)) {
+		const dir = await this.#safePath(prefix);
+		if (dir !== this.#root) {
 			try {
-				const stat = fs.statSync(dir);
-				if (stat.isDirectory() && fs.readdirSync(dir).length === 0) {
-					fs.rmdirSync(dir);
+				const stat = await fsp.stat(dir);
+				if (stat.isDirectory() && (await fsp.readdir(dir)).length === 0) {
+					await fsp.rmdir(dir);
 				}
 			} catch {
 				// benign — leave non-empty / vanished dirs alone.
@@ -719,7 +758,9 @@ export class LocalDriver implements StorageDriver {
 					: `${prefix}/`;
 		for await (const entry of this.list(normalizedPrefix)) {
 			if (recursive) {
-				files.push(new DriveFile(entry.path, this, this.#entryMetadata(entry)));
+				files.push(
+					new DriveFile(entry.path, this, await this.#entryMetadata(entry)),
+				);
 				continue;
 			}
 			// Non-recursive: collapse anything below the immediate level
@@ -727,7 +768,9 @@ export class LocalDriver implements StorageDriver {
 			const rest = entry.path.slice(normalizedPrefix.length);
 			const slash = rest.indexOf("/");
 			if (slash === -1) {
-				files.push(new DriveFile(entry.path, this, this.#entryMetadata(entry)));
+				files.push(
+					new DriveFile(entry.path, this, await this.#entryMetadata(entry)),
+				);
 			} else {
 				const dirPrefix = normalizedPrefix + rest.slice(0, slash);
 				if (!directories.has(dirPrefix)) {
@@ -739,7 +782,7 @@ export class LocalDriver implements StorageDriver {
 	}
 
 	/** Build a metadata snapshot from a cheap `list()` entry (no extra stat). */
-	#entryMetadata(entry: StorageEntry): Metadata {
+	async #entryMetadata(entry: StorageEntry): Promise<Metadata> {
 		const mimeType = inferMimeType(path.extname(entry.path).toLowerCase());
 		return {
 			size: entry.size,
@@ -748,19 +791,24 @@ export class LocalDriver implements StorageDriver {
 			contentType: mimeType,
 			lastModified: entry.lastModified,
 			etag: "",
-			visibility: this.#readVisibility(entry.path),
+			visibility: await this.#readVisibility(entry.path),
 		};
 	}
 
 	async *list(prefix: string): AsyncIterable<StorageEntry> {
-		if (!fs.existsSync(this.#root)) return;
-		// `recursive: true` on readdirSync gives us every descendant in
-		// one call; `withFileTypes: true` lets us skip directories and
-		// inspect each entry without a follow-up stat for type.
-		const entries = fs.readdirSync(this.#root, {
-			recursive: true,
-			withFileTypes: true,
-		});
+		// `recursive: true` gives us every descendant in one call;
+		// `withFileTypes: true` lets us skip directories and inspect each
+		// entry without a follow-up stat for type.
+		let entries: fs.Dirent[];
+		try {
+			entries = await fsp.readdir(this.#root, {
+				recursive: true,
+				withFileTypes: true,
+			});
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw err;
+		}
 		for (const entry of entries) {
 			if (!entry.isFile()) continue;
 			// `parentPath` is typed on Dirent since Node 20.12, which the engine
@@ -773,9 +821,25 @@ export class LocalDriver implements StorageDriver {
 			// Exclude sidecars — implementation detail.
 			if (rel.endsWith(VISIBILITY_SIDECAR_SUFFIX)) continue;
 			if (!rel.startsWith(prefix)) continue;
-			const stat = fs.statSync(full);
+			const stat = await fsp.stat(full);
 			yield { path: rel, size: stat.size, lastModified: stat.mtime };
 		}
+	}
+}
+
+/**
+ * Whether a path exists, without `existsSync` blocking the event loop.
+ *
+ * Used only where the answer is genuinely needed on its own; where a read or
+ * unlink follows, the operation's own ENOENT answers it in one syscall and
+ * without the window between the two.
+ */
+async function exists(target: string): Promise<boolean> {
+	try {
+		await fsp.access(target);
+		return true;
+	} catch {
+		return false;
 	}
 }
 

@@ -10,10 +10,10 @@
  * @implements MISS-25
  */
 
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { matchesIfNoneMatch, statTag } from "./etag.js";
 import { DEFAULT_EXTENSIONS, inferMimeType } from "./mime-types.js";
 import { VISIBILITY_SIDECAR_SUFFIX } from "./StorageManager.js";
 
@@ -142,13 +142,14 @@ export class StaticMiddleware {
 			return next();
 		}
 
-		const etag = createHash("md5")
-			.update(`${stat.size}-${stat.mtimeMs}`)
-			.digest("hex");
+		// Quoted and weak (RFC 9110 §8.8.3): the bare md5 hex this used to send
+		// is not a valid entity-tag, and a strict cache may ignore it outright.
+		const etag = statTag(stat);
 
-		// ETag check — 304 Not Modified
-		const ifNoneMatch = ctx.request.header("if-none-match");
-		if (ifNoneMatch === etag) {
+		// ETag check — 304 Not Modified. The header is a list compared weakly
+		// (§13.1.2); raw equality missed a client sending two tags, or one
+		// sending back `W/"x"` for a tag we wrote as `"x"`.
+		if (matchesIfNoneMatch(ctx.request.header("if-none-match"), etag)) {
 			ctx.response.status(304);
 			return;
 		}

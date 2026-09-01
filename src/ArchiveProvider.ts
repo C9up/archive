@@ -64,53 +64,82 @@ const DEFAULT_CONFIG: ArchiveConfig = {
 };
 
 export default class ArchiveProvider {
+	/**
+	 * The one lazily-built manager, read by BOTH ways in. Set by
+	 * {@link register}, which always runs before {@link boot}.
+	 */
+	#storage: (() => StorageManager) | undefined;
+
 	constructor(protected app: ArchiveAppContext) {}
 
 	register(): void {
-		this.app.container.singleton(DriveManager, () => {
-			const raw = this.app.config.get<ArchiveConfig | DriveConfig>("archive");
-			return new DriveManager(resolveDriveConfig(raw));
-		});
+		// ONE cell, shared by the container's bindings and the service accessor.
+		//
+		// The container had its own factory and boot() built a second manager
+		// for the accessor, so `services/main`'s storage and
+		// `container.resolve(StorageManager)` were different objects over
+		// different drivers: a fake bound in a test, or a driver swapped at
+		// runtime, was invisible from the other side.
+		//
+		// Memoised here rather than resolved through the container because the
+		// accessor is synchronous and the container is not — which is exactly
+		// why boot() could not simply reuse the container's instance.
+		let drive: DriveManager | undefined;
+		const driveManager = (): DriveManager => {
+			drive ??= new DriveManager(
+				resolveDriveConfig(
+					this.app.config.get<ArchiveConfig | DriveConfig>("archive"),
+				),
+			);
+			return drive;
+		};
+		let manager: StorageManager | undefined;
+		const storageManager = (): StorageManager => {
+			manager ??= driveManager().use();
+			return manager;
+		};
+		this.#storage = storageManager;
+
+		this.app.container.singleton(DriveManager, () => driveManager());
 		// Backward-compatible bindings — the default disk is what apps
 		// previously resolved via `StorageManager` / the `storage` token.
-		this.app.container.singleton(StorageManager, async () =>
-			(await this.app.container.resolve<DriveManager>(DriveManager)).use(),
-		);
-		this.app.container.singleton("storage", async () =>
-			this.app.container.resolve<StorageManager>(StorageManager),
-		);
-		this.app.container.singleton("drive", async () =>
-			this.app.container.resolve<DriveManager>(DriveManager),
-		);
+		this.app.container.singleton(StorageManager, () => storageManager());
+		this.app.container.singleton("storage", () => storageManager());
+		this.app.container.singleton("drive", () => driveManager());
 	}
 
 	async boot(): Promise<void> {
-		// No eager resolution when archive is unconfigured: an app that registers
-		// this provider and never uses storage should not trigger LocalDriver's
-		// mkdirSync of './storage' at boot, which fails on a read-only rootfs.
-		//
-		// But returning here left the two ways in disagreeing: the container
-		// still served `storage` from the default config, while the service
-		// accessor threw "before boot". Same provider, same application, two
-		// answers. It gets a resolver instead — nothing is constructed until
-		// something genuinely reaches for storage, and then both paths give the
-		// same manager.
+		const storage = this.#storage;
+		if (storage === undefined) {
+			throw new ArchiveError(
+				"E_ARCHIVE_PROVIDER_NOT_REGISTERED",
+				"ArchiveProvider.boot() ran before register().",
+				{
+					hint: "Providers register before they boot — call register() first.",
+				},
+			);
+		}
+		// The accessor reads the same cell the container's bindings read, so
+		// however storage is reached there is one manager behind it.
+		setStorageResolver(storage);
+
+		// No eager construction when archive is unconfigured: an app that
+		// registers this provider and never uses storage should not trigger
+		// LocalDriver's mkdir of './storage' at boot, which fails on a
+		// read-only rootfs. The resolver above is what keeps that lazy case
+		// answering instead of throwing "before boot".
 		const archive = this.app.config.get<ArchiveConfig | DriveConfig>("archive");
 		if (
 			archive === undefined ||
 			archive === null ||
 			typeof archive !== "object"
 		) {
-			// Built the way the container's own factory builds it, so the two
-			// cannot drift — and synchronously, because the accessor is.
-			setStorageResolver(() =>
-				new DriveManager(resolveDriveConfig(archive)).use(),
-			);
 			return;
 		}
-		const manager =
-			await this.app.container.resolve<StorageManager>(StorageManager);
-		setStorage(manager);
+		// Configured: build now, so a misspelled driver or a missing
+		// driver-specific block is a boot failure rather than a surprise on the
+		// first upload.
+		setStorage(storage());
 	}
 
 	async start(): Promise<void> {}

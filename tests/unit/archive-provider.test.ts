@@ -262,3 +262,59 @@ describe("ArchiveProvider > the two ways in agree", () => {
 		expect(getStorage()).toBeDefined();
 	});
 });
+
+describe("ArchiveProvider > one manager, however you reach for it", () => {
+	it("gives the container and the service accessor the same instance", async () => {
+		// The container had its own factory while boot() built a second manager
+		// for the accessor: two objects over two LocalDrivers, so a driver
+		// swapped on one was invisible from the other.
+		// A fresh module registry: the accessor holds a module-level singleton
+		// that earlier tests in this file have already populated.
+		vi.resetModules();
+		// The class token has to come from the SAME module instance the provider
+		// registered with: a fresh `import()` is a different class object, and
+		// the container keys on identity.
+		const { default: ProviderFresh } = await import(
+			"../../src/ArchiveProvider.js"
+		);
+		const { StorageManager: StorageManagerFresh } = await import(
+			"../../src/index.js"
+		);
+		const { getStorage } = await import("../../src/services/main.js");
+		const app = buildApp({
+			archive: { driver: "local", local: { root: "./tmp-storage-identity" } },
+		});
+		const provider = new ProviderFresh(app);
+		provider.register();
+		await provider.boot();
+
+		const fromContainer = await app.container.resolve<StorageManager>(
+			StorageManagerFresh,
+		);
+		const fromToken = await app.container.resolve<StorageManager>("storage");
+
+		expect(fromContainer).toBe(getStorage());
+		expect(fromToken).toBe(getStorage());
+	});
+
+	it("keeps them identical on the unconfigured, lazy path too", async () => {
+		vi.resetModules();
+		const { default: ProviderFresh } = await import(
+			"../../src/ArchiveProvider.js"
+		);
+		const app = buildApp({});
+		const provider = new ProviderFresh(app);
+		provider.register();
+		await provider.boot();
+
+		const first = await app.container.resolve<StorageManager>("storage");
+		const second = await app.container.resolve<StorageManager>("storage");
+		expect(first).toBe(second);
+		// The accessor's lazy path lands on that same object.
+		const { getStorage, default: storage } = await import(
+			"../../src/services/main.js"
+		);
+		expect(typeof storage.put).toBe("function");
+		expect(getStorage()).toBe(first);
+	});
+});
