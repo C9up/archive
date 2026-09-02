@@ -103,6 +103,57 @@ describe("StaticMiddleware", () => {
 		expect(response.sendBuffer).toHaveBeenCalledTimes(1);
 	});
 
+	/**
+	 * The default that made a rebuilt asset invisible: a day of max-age means
+	 * the browser does not ask again, so a stylesheet recompiled during
+	 * development kept rendering as the previous one, with nothing to see.
+	 * Upstream's static server defaults to 0 and revalidates.
+	 */
+	it("defaults to max-age=0, so a changed file is re-fetched", async () => {
+		fs.writeFileSync(path.join(root, "a.css"), "a{}");
+		const { ctx, response } = makeCtx("GET", "/static/a.css");
+
+		await middleware.handle(
+			ctx,
+			vi.fn<() => Promise<void>>(async () => {}),
+		);
+
+		expect(response.header).toHaveBeenCalledWith(
+			"Cache-Control",
+			"public, max-age=0",
+		);
+	});
+
+	it("still sends an ETag and a Last-Modified, so revalidation is cheap", async () => {
+		fs.writeFileSync(path.join(root, "b.css"), "b{}");
+		const { ctx, response } = makeCtx("GET", "/static/b.css");
+
+		await middleware.handle(
+			ctx,
+			vi.fn<() => Promise<void>>(async () => {}),
+		);
+
+		const sent = response.header.mock.calls.map((call: unknown[]) => call[0]);
+		expect(sent).toContain("ETag");
+		expect(sent).toContain("Last-Modified");
+	});
+
+	it("honours an explicit maxAge, for content served under a hashed name", async () => {
+		fs.writeFileSync(path.join(root, "c.css"), "c{}");
+		const hashed = new StaticMiddleware({ root, maxAge: 31536000 });
+		const { ctx, response } = makeCtx("GET", "/static/c.css");
+
+		await hashed.handle(
+			ctx,
+			vi.fn<() => Promise<void>>(async () => {}),
+		);
+
+		expect(response.header).toHaveBeenCalledWith(
+			"Cache-Control",
+			"public, max-age=31536000",
+		);
+	});
+
 	it("falls through to next() when the file is missing", async () => {
 		const { ctx, response } = makeCtx("GET", "/static/never.txt");
 		const next = vi.fn<() => Promise<void>>(async () => {});

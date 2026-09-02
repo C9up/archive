@@ -43,7 +43,22 @@ export interface StaticConfig {
 	root: string;
 	/** URL prefix (default: /static). */
 	prefix?: string;
-	/** Max-age for Cache-Control header in seconds (default: 86400 = 1 day). */
+	/**
+	 * `max-age` in seconds. Default 0, as AdonisJS's static server is.
+	 *
+	 * Zero does NOT mean "do not cache": the response still carries an ETag and
+	 * a Last-Modified, so a browser keeps the bytes and asks whether they are
+	 * still good — answered with a 304 and no body. What zero removes is the
+	 * window in which it does not ask at all.
+	 *
+	 * The old default was a day, which is right for fingerprinted assets and
+	 * wrong for everything else: a stylesheet rebuilt during development was
+	 * not re-fetched for 24 hours, so the page kept rendering with the previous
+	 * one and nothing about it looked broken.
+	 *
+	 * Set it high for content served under a content-addressed name, or put a
+	 * CDN in front — which is what upstream recommends for production anyway.
+	 */
 	maxAge?: number;
 	/** File extensions to serve (default: common web assets). */
 	extensions?: string[];
@@ -71,7 +86,7 @@ export class StaticMiddleware {
 		// detect symlink-based escapes consistently.
 		this.#root = fs.existsSync(resolved) ? fs.realpathSync(resolved) : resolved;
 		this.#prefix = prefix;
-		this.#maxAge = config.maxAge ?? 86400;
+		this.#maxAge = config.maxAge ?? 0;
 		this.#extensions = new Set(config.extensions ?? DEFAULT_EXTENSIONS);
 	}
 
@@ -159,6 +174,10 @@ export class StaticMiddleware {
 		ctx.response.header("Content-Length", String(stat.size));
 		ctx.response.header("Cache-Control", `public, max-age=${this.#maxAge}`);
 		ctx.response.header("ETag", etag);
+		// Sent alongside the ETag, as upstream does. A client that revalidates
+		// with `If-Modified-Since` rather than `If-None-Match` has nothing to
+		// compare against without it.
+		ctx.response.header("Last-Modified", stat.mtime.toUTCString());
 
 		if (ctx.request.method() === "HEAD") {
 			ctx.response.status(200);
