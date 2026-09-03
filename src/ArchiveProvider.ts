@@ -105,7 +105,14 @@ export default class ArchiveProvider {
 		// Backward-compatible bindings — the default disk is what apps
 		// previously resolved via `StorageManager` / the `storage` token.
 		this.app.container.singleton(StorageManager, () => storageManager());
+		// Namespaced by the package that owns it, the way upstream namespaces
+		// `lucid.db`, `auth.manager` and `drive.manager` by theirs. The bare
+		// token stays bound beside it: it is what every existing
+		// `container.make(...)` asks for, and a token is not worth breaking an
+		// application over.
+		this.app.container.singleton("archive.storage", () => storageManager());
 		this.app.container.singleton("storage", () => storageManager());
+		this.app.container.singleton("archive.drive", () => driveManager());
 		this.app.container.singleton("drive", () => driveManager());
 	}
 

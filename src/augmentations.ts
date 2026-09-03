@@ -24,8 +24,18 @@ import type { StorageManager } from "./StorageManager.js";
 declare module "@c9up/ream/types" {
 	interface ContainerBindings {
 		/** The drive manager, bound by `ArchiveProvider`. */
+		"archive.drive": DriveManager;
+		/**
+		 * The same binding under the name it had before the token carried its
+		 * package. Kept bound so an existing `container.make(...)` resolves.
+		 */
 		drive: DriveManager;
 		/** The default disk, bound by `ArchiveProvider`. */
+		"archive.storage": StorageManager;
+		/**
+		 * The same binding under the name it had before the token carried its
+		 * package. Kept bound so an existing `container.make(...)` resolves.
+		 */
 		storage: StorageManager;
 	}
 }
