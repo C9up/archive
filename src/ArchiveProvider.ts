@@ -21,6 +21,7 @@
  *   import storage from '@c9up/archive/services/main'
  *   await storage.put('uploads/avatar.png', buffer)
  */
+import "./augmentations.js";
 import { type DriveConfig, DriveManager } from "./DriveManager.js";
 import { ArchiveError } from "./errors.js";
 

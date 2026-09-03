@@ -48,7 +48,8 @@
     "@c9up/helix": "^0.2.0",
     "@types/node": "^22.19.15",
     "typescript": "^6.0.2",
-    "vitest": "^4.1.2"
+    "vitest": "^4.1.2",
+    "@c9up/ream": "^0.2.0"
   },
   "files": [
     "LICENSE",

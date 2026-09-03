@@ -11,6 +11,8 @@
  * and a signed-route handler for serving HMAC-signed Local URLs.
  */
 
+import "./augmentations.js";
+
 export type { ArchiveConfig } from "./ArchiveProvider.js";
 export {
 	type DriveConfig,
