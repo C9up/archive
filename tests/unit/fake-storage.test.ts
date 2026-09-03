@@ -8,7 +8,6 @@ function defined<T>(value: T | null | undefined): T {
 	return value;
 }
 
-
 async function drainStream(readable: NodeJS.ReadableStream): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of readable) {
@@ -181,7 +180,9 @@ describe("FakeStorage", () => {
 		// Mutating the snapshot does not affect the store.
 		defined(stored[0]).content.write("X", 0);
 		const fresh = storage.getStored();
-		expect(defined(fresh[0]).content.toString("utf8").startsWith("X")).toBe(false);
+		expect(defined(fresh[0]).content.toString("utf8").startsWith("X")).toBe(
+			false,
+		);
 	});
 
 	it("assertStored passes when the path was put()", async () => {

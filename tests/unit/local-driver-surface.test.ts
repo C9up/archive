@@ -12,7 +12,6 @@ import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LocalDriver, StorageManager } from "../../src/index.js";
 
-
 describe("archive > the local disk", () => {
 	let root: string;
 	let driver: LocalDriver;
@@ -85,7 +84,8 @@ describe("archive > the local disk", () => {
 
 			const [file] = [...(await driver.listAll("")).objects];
 
-			if (file === undefined || !file.isFile) throw new Error("expected a file");
+			if (file === undefined || !file.isFile)
+				throw new Error("expected a file");
 			expect(await file.getMetaData()).toMatchObject({
 				size: 5,
 				mimeType: "text/plain",

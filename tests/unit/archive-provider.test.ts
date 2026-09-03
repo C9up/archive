@@ -288,9 +288,8 @@ describe("ArchiveProvider > one manager, however you reach for it", () => {
 		provider.register();
 		await provider.boot();
 
-		const fromContainer = await app.container.resolve<StorageManager>(
-			StorageManagerFresh,
-		);
+		const fromContainer =
+			await app.container.resolve<StorageManager>(StorageManagerFresh);
 		const fromToken = await app.container.resolve<StorageManager>("storage");
 
 		expect(fromContainer).toBe(getStorage());

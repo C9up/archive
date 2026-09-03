@@ -3,7 +3,6 @@ import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GcsDriver } from "../../src/index.js";
 
-
 async function drainStream(readable: NodeJS.ReadableStream): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of readable) {
@@ -262,17 +261,16 @@ describe("GcsDriver", () => {
 			expect(new URL(url).searchParams.get("X-Goog-Expires")).toBe("60");
 		});
 
-		it.each([
-			0,
-			-1,
-			Number.NaN,
-			Number.POSITIVE_INFINITY,
-			604_801,
-		])("rejects out-of-range expiresIn (%s)", (bad) => {
-			expect(() =>
-				driver.getSignedUrl("x", { expiresIn: bad as number }),
-			).toThrow(expect.objectContaining({ code: "E_ARCHIVE_INVALID_EXPIRY" }));
-		});
+		it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 604_801])(
+			"rejects out-of-range expiresIn (%s)",
+			(bad) => {
+				expect(() =>
+					driver.getSignedUrl("x", { expiresIn: bad as number }),
+				).toThrow(
+					expect.objectContaining({ code: "E_ARCHIVE_INVALID_EXPIRY" }),
+				);
+			},
+		);
 	});
 
 	describe("putStream / getStream", () => {

@@ -8,7 +8,6 @@ function defined<T>(value: T | null | undefined): T {
 	return value;
 }
 
-
 async function drainStream(readable: NodeJS.ReadableStream): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of readable) {
