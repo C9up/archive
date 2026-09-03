@@ -135,7 +135,7 @@ describe("archive > the fake's bulk operations", () => {
 
 		const [file] = [...(await fake.listAll("")).objects];
 
-		if (!file.isFile) throw new Error("expected a file");
+		if (file === undefined || !file.isFile) throw new Error("expected a file");
 		expect(await file.getMetaData()).toMatchObject({
 			size: 5,
 			visibility: "public",

@@ -2,6 +2,13 @@ import { Readable } from "node:stream";
 import { beforeEach, describe, expect, it } from "vitest";
 import { FakeStorage } from "../../src/testing/FakeStorage.js";
 
+/** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
+function defined<T>(value: T | null | undefined): T {
+	if (value == null) throw new Error("expected a defined value");
+	return value;
+}
+
+
 async function drainStream(readable: NodeJS.ReadableStream): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of readable) {
@@ -168,13 +175,13 @@ describe("FakeStorage", () => {
 		await storage.put("docs/readme.txt", "hello");
 		const stored = storage.getStored();
 		expect(stored).toHaveLength(1);
-		expect(stored[0].path).toBe("docs/readme.txt");
-		expect(stored[0].content.toString("utf8")).toBe("hello");
-		expect(stored[0].visibility).toBe("public");
+		expect(defined(stored[0]).path).toBe("docs/readme.txt");
+		expect(defined(stored[0]).content.toString("utf8")).toBe("hello");
+		expect(defined(stored[0]).visibility).toBe("public");
 		// Mutating the snapshot does not affect the store.
-		stored[0].content.write("X", 0);
+		defined(stored[0]).content.write("X", 0);
 		const fresh = storage.getStored();
-		expect(fresh[0].content.toString("utf8").startsWith("X")).toBe(false);
+		expect(defined(fresh[0]).content.toString("utf8").startsWith("X")).toBe(false);
 	});
 
 	it("assertStored passes when the path was put()", async () => {

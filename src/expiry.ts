@@ -61,7 +61,8 @@ export function parseExpiry(expiresIn: number | string): number {
 			},
 		);
 	}
-	return Math.round(Number.parseFloat(match[1]) * multiplier);
+	const [, amount] = match;
+	return Math.round(Number.parseFloat(amount ?? "0") * multiplier);
 }
 
 /**

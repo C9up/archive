@@ -2,6 +2,13 @@ import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { S3Driver } from "../../src/index.js";
 
+/** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
+function defined<T>(value: T | null | undefined): T {
+	if (value == null) throw new Error("expected a defined value");
+	return value;
+}
+
+
 async function drainStream(readable: NodeJS.ReadableStream): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of readable) {
@@ -524,8 +531,8 @@ describe("S3Driver > listing a prefix as a page", () => {
 			"invoices/2025",
 			"invoices/readme.txt",
 		]);
-		expect(objects[0].isDirectory).toBe(true);
-		expect(objects[2].isFile).toBe(true);
+		expect(defined(objects[0]).isDirectory).toBe(true);
+		expect(defined(objects[2]).isFile).toBe(true);
 	});
 
 	it("adds the delimiter and the trailing slash to the prefix by default", async () => {
@@ -603,7 +610,7 @@ describe("S3Driver > listing a prefix as a page", () => {
 
 		const [file] = [...(await driver.listAll("", { recursive: true })).objects];
 
-		if (!file.isFile) throw new Error("expected a file");
+		if (file === undefined || !file.isFile) throw new Error("expected a file");
 		expect(file.key).toBe("a.txt");
 		expect(file.name).toBe("a.txt");
 	});

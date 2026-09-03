@@ -3,6 +3,7 @@ import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GcsDriver } from "../../src/index.js";
 
+
 async function drainStream(readable: NodeJS.ReadableStream): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of readable) {
@@ -484,7 +485,7 @@ describe("GcsDriver > listing, deleting a prefix, and the rest", () => {
 			"invoices/readme.txt",
 		]);
 		const file = objects[1];
-		if (!file.isFile) throw new Error("expected a file");
+		if (file === undefined || !file.isFile) throw new Error("expected a file");
 		expect(await file.getMetaData()).toMatchObject({
 			size: 12,
 			mimeType: "text/plain",

@@ -30,7 +30,7 @@ describe("archive > the file handle from a listing", () => {
 		const [file] = [
 			...(await driver.listAll("docs", { recursive: true })).objects,
 		];
-		if (!file.isFile) throw new Error("expected a file");
+		if (file === undefined || !file.isFile) throw new Error("expected a file");
 		return file;
 	};
 
