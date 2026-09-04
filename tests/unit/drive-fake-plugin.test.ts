@@ -54,7 +54,7 @@ describe("helix plugin > driveFake()", () => {
 		});
 		expect(getter).toBeDefined();
 
-		const cleanups: Array<() => void | Promise<void>> = [];
+		const cleanups: Parameters<TestContext["cleanup"]>[0][] = [];
 		// `drive` is part of the augmented context, so a full TestContext carries
 		// one. The getter never reads it — it produces the value that replaces
 		// it — but the stub has to be a whole context to be handed to it.

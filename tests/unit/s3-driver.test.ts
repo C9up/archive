@@ -1,5 +1,13 @@
 import { Readable } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type MockInstance,
+	vi,
+} from "vitest";
 import { S3Driver } from "../../src/index.js";
 
 /** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
@@ -18,7 +26,20 @@ async function drainStream(readable: NodeJS.ReadableStream): Promise<Buffer> {
 
 describe("S3Driver", () => {
 	let driver: S3Driver;
-	let fetchSpy: ReturnType<typeof vi.spyOn>;
+	// Typed by what it stands in for: an untyped `spyOn` records a zero-length
+	// tuple, so every read of `calls[n][1]` needed an optional chain and a cast —
+	// and an optional chain in front of a cast is a lie the runtime settles, since
+	// `undefined as RequestInit` still throws on the first property.
+	let fetchSpy: MockInstance<typeof globalThis.fetch>;
+
+	/** The `RequestInit` of the nth recorded fetch — proven present, not asserted. */
+	function requestInit(nth: number): RequestInit {
+		const call = fetchSpy.mock.calls[nth];
+		if (call === undefined) throw new Error(`no fetch call #${nth}`);
+		const init = call[1];
+		if (init === undefined) throw new Error(`fetch call #${nth} had no init`);
+		return init;
+	}
 
 	beforeEach(() => {
 		driver = new S3Driver({
@@ -244,8 +265,7 @@ describe("S3Driver", () => {
 		it("setVisibility('private') PUTs ?acl with x-amz-acl: private", async () => {
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
 			await driver.setVisibility("cat.png", "private");
-			const headers = (fetchSpy.mock.calls[0]?.[1] as RequestInit)
-				.headers as Record<string, string>;
+			const headers = requestInit(0).headers as Record<string, string>;
 			expect(headers["x-amz-acl"]).toBe("private");
 		});
 
@@ -349,7 +369,7 @@ describe("S3Driver", () => {
 			// Call 4: POST ?uploadId=… with the Complete XML
 			const completeCall = fetchSpy.mock.calls[3];
 			expect(String(completeCall?.[0])).toContain("uploadId=test-upload-id");
-			const completeBody = (completeCall?.[1] as RequestInit).body as Buffer;
+			const completeBody = requestInit(3).body as Buffer;
 			expect(completeBody.toString("utf8")).toContain(
 				'<PartNumber>1</PartNumber><ETag>"etag-1"</ETag>',
 			);
@@ -392,7 +412,7 @@ describe("S3Driver", () => {
 			).rejects.toThrow(/UploadPart failed/);
 			// Call 3 should be the abort (DELETE ?uploadId=abortMe).
 			const abortCall = fetchSpy.mock.calls[2];
-			expect((abortCall?.[1] as RequestInit).method).toBe("DELETE");
+			expect(requestInit(2).method).toBe("DELETE");
 			expect(String(abortCall?.[0])).toContain("uploadId=abortMe");
 		});
 
