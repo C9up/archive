@@ -41,6 +41,18 @@ export function getStorage(): StorageManager | undefined {
 	return instance;
 }
 
+/**
+ * @internal Release the singleton, so a shut-down application does not leave a
+ * dead storage manager reachable through `services/main`.
+ *
+ * The caller checks ownership first (`getStorage() === mine`): two applications
+ * share this module in one process, and the one shutting down must not clear
+ * what the other has since bound.
+ */
+export function clearStorage(): void {
+	instance = undefined;
+}
+
 const storage: StorageManager = new Proxy({} as StorageManager, {
 	get(_target, prop) {
 		// A module loader inspects what it imports before anyone uses it: it reads

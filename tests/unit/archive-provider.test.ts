@@ -317,3 +317,58 @@ describe("ArchiveProvider > one manager, however you reach for it", () => {
 		expect(getStorage()).toBe(first);
 	});
 });
+
+describe("ArchiveProvider > shutdown", () => {
+	/**
+	 * Both halves come from the SAME module graph.
+	 *
+	 * A test above calls `vi.resetModules()`, so the file's top-level
+	 * `ArchiveProvider` and a later dynamic `services/main` are two different
+	 * copies with two different `instance` cells — and the ownership guard, quite
+	 * correctly, refuses to clear a singleton it never set.
+	 */
+	async function freshGraph() {
+		vi.resetModules();
+		const { default: Provider } = await import("../../src/ArchiveProvider.js");
+		const main = await import("../../src/services/main.js");
+		return { Provider, ...main };
+	}
+
+	const configured = () =>
+		buildApp({
+			archive: { driver: "local", local: { root: "./tmp-storage" } },
+		});
+
+	it("releases the services/main singleton it bound", async () => {
+		const { Provider, getStorage } = await freshGraph();
+		const provider = new Provider(configured());
+		provider.register();
+		await provider.boot();
+		expect(getStorage()).toBeDefined();
+
+		await provider.shutdown();
+
+		// A stopped application left a dead storage manager reachable through
+		// `import storage from '@c9up/archive/services/main'`.
+		expect(getStorage()).toBeUndefined();
+	});
+
+	it("leaves a manager another application has since bound alone", async () => {
+		const { Provider, getStorage } = await freshGraph();
+		const provider = new Provider(configured());
+		provider.register();
+		await provider.boot();
+
+		// A second application boots in the same process and takes the singleton
+		// over; the first one then shuts down.
+		const other = new Provider(configured());
+		other.register();
+		await other.boot();
+		const replacement = getStorage();
+		if (!replacement) throw new Error("expected the second boot to bind one");
+
+		await provider.shutdown();
+
+		expect(getStorage()).toBe(replacement);
+	});
+});

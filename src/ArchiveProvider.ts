@@ -32,7 +32,12 @@ import {
 	type StorageDriver,
 	StorageManager,
 } from "./StorageManager.js";
-import { setStorage, setStorageResolver } from "./services/main.js";
+import {
+	clearStorage,
+	getStorage,
+	setStorage,
+	setStorageResolver,
+} from "./services/main.js";
 
 interface ArchiveContainer {
 	singleton(token: unknown, factory: () => unknown): void;
@@ -65,6 +70,9 @@ const DEFAULT_CONFIG: ArchiveConfig = {
 };
 
 export default class ArchiveProvider {
+	/** What this provider bound, so shutdown only clears its own. */
+	#owned: StorageManager | undefined;
+
 	/**
 	 * The one lazily-built manager, read by BOTH ways in. Set by
 	 * {@link register}, which always runs before {@link boot}.
@@ -147,12 +155,22 @@ export default class ArchiveProvider {
 		// Configured: build now, so a misspelled driver or a missing
 		// driver-specific block is a boot failure rather than a surprise on the
 		// first upload.
-		setStorage(storage());
+		const manager = storage();
+		this.#owned = manager;
+		setStorage(manager);
 	}
 
 	async start(): Promise<void> {}
 	async ready(): Promise<void> {}
-	async shutdown(): Promise<void> {}
+	async shutdown(): Promise<void> {
+		// Release the module-level singleton, while it is still ours. A stopped
+		// application left a dead storage manager reachable through `services/main`, and
+		// with two applications in one process the survivor's binding must not
+		// be the one cleared.
+		if (this.#owned !== undefined && getStorage() === this.#owned)
+			clearStorage();
+		this.#owned = undefined;
+	}
 }
 
 /** Narrow an unknown config value to the multi-disk {@link DriveConfig} shape. */
