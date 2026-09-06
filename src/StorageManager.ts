@@ -262,6 +262,15 @@ export interface LocalDriverOptions {
 	signingSecret?: string;
 }
 
+/**
+ * `O_NOFOLLOW`, or nothing on a platform without it.
+ *
+ * Windows has no symlink-refusing open and leaves `fs.constants.O_NOFOLLOW`
+ * undefined; or-ing that into the flags yields `NaN` and every open fails, so
+ * the flag is contributed only where it exists.
+ */
+const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
+
 export class LocalDriver implements StorageDriver {
 	#root: string;
 	#signingSecret: string | null;
@@ -377,7 +386,27 @@ export class LocalDriver implements StorageDriver {
 	): Promise<void> {
 		const full = await this.#safePath(filePath);
 		await fsp.mkdir(path.dirname(full), { recursive: true });
-		await fsp.writeFile(full, content);
+		// Written through a descriptor opened with O_NOFOLLOW, not by name.
+		//
+		// `#safePath` canonicalises and checks, then returns a STRING, and the
+		// write happened later against that string. Between the two, the last
+		// component can be replaced by a symlink pointing anywhere, and a write
+		// by name follows it — the check passed on one object and the write
+		// landed on another. Refusing to follow a link at open time takes the
+		// swap off the table: the open fails instead of writing outside the root.
+		const handle = await fsp.open(
+			full,
+			fs.constants.O_WRONLY |
+				fs.constants.O_CREAT |
+				fs.constants.O_TRUNC |
+				O_NOFOLLOW,
+			0o666,
+		);
+		try {
+			await handle.writeFile(content);
+		} finally {
+			await handle.close();
+		}
 		// Only `visibility` has a filesystem-equivalent (the sidecar).
 		// contentType/cacheControl/... have no local meaning.
 		if (options?.visibility !== undefined) {
@@ -406,15 +435,32 @@ export class LocalDriver implements StorageDriver {
 	): Promise<void> {
 		const full = await this.#safePath(filePath);
 		await fsp.mkdir(path.dirname(full), { recursive: true });
+		// Same descriptor-first rule as put(): the stream is created FROM the
+		// handle, so it writes to the object the open accepted rather than to
+		// whatever the name points at by the time the first chunk arrives.
+		const handle = await fsp.open(
+			full,
+			fs.constants.O_WRONLY |
+				fs.constants.O_CREAT |
+				fs.constants.O_TRUNC |
+				O_NOFOLLOW,
+			0o666,
+		);
 		// `pipeline` propagates errors and destroys the write target on
-		// failure — no manual cleanup needed.
-		await pipeline(readable, fs.createWriteStream(full));
+		// failure — and closing the stream closes the handle it was made from.
+		await pipeline(readable, handle.createWriteStream());
 	}
 
 	async get(filePath: string): Promise<Buffer | null> {
 		const full = await this.#safePath(filePath);
 		try {
-			return await fsp.readFile(full);
+			// Read through a descriptor, refusing to follow a link — see put().
+			const handle = await fsp.open(full, fs.constants.O_RDONLY | O_NOFOLLOW);
+			try {
+				return await handle.readFile();
+			} finally {
+				await handle.close();
+			}
 		} catch (err) {
 			// One syscall instead of exists-then-read: the pair also answered
 			// `null` for a file that was deleted between the two.
@@ -425,14 +471,25 @@ export class LocalDriver implements StorageDriver {
 
 	async getStream(filePath: string): Promise<NodeJS.ReadableStream> {
 		const full = await this.#safePath(filePath);
-		if (!(await exists(full))) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`File does not exist at path '${filePath}'`,
-				{ hint: "Confirm the path and that the file was put() first." },
-			);
+		// One open instead of exists-then-create: the pair also handed back a
+		// stream over whatever replaced the file between the two calls, and it
+		// followed a symlink planted there. The open refuses the link and IS the
+		// existence check.
+		let handle: fsp.FileHandle;
+		try {
+			handle = await fsp.open(full, fs.constants.O_RDONLY | O_NOFOLLOW);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+				throw new ArchiveError(
+					"E_ARCHIVE_NOT_FOUND",
+					`File does not exist at path '${filePath}'`,
+					{ hint: "Confirm the path and that the file was put() first." },
+				);
+			}
+			throw err;
 		}
-		return fs.createReadStream(full);
+		// Closing the stream closes the handle it was made from.
+		return handle.createReadStream();
 	}
 
 	async delete(filePath: string): Promise<boolean> {
