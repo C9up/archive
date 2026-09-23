@@ -7,6 +7,8 @@
  * installed AND working.
  */
 
+import { stubsRoot } from "./stubs.js";
+
 interface Codemods {
 	addProvider(importPath: string): Promise<void>;
 	addEnvVars(vars: Record<string, string>): Promise<void>;
@@ -15,6 +17,12 @@ interface Codemods {
 		content: string,
 		options?: { force?: boolean },
 	): Promise<void>;
+	makeUsingStub(
+		stubsRoot: string,
+		stubPath: string,
+		state?: Record<string, string | number | boolean>,
+		options?: { force?: boolean },
+	): Promise<{ path: string; contents: string }>;
 }
 
 export async function configure(codemods: Codemods): Promise<void> {
@@ -26,23 +34,5 @@ export async function configure(codemods: Codemods): Promise<void> {
 	});
 
 	await codemods.addProvider("@c9up/archive/provider");
-	await codemods.writeFile(
-		"config/archive.ts",
-		`import { defineConfig, services } from '@c9up/archive'
-import env from '#start/env'
-
-export default defineConfig({
-  // The disk used when \`drive.use()\` is called with no argument.
-  default: env.get('DRIVE_DISK', 'fs'),
-
-  services: {
-    fs: services.fs({
-      location: 'storage/uploads',
-      // Required before \`getSignedUrl\` will answer on the local disk.
-      signingSecret: env.get('APP_KEY'),
-    }),
-    // s3: services.s3({ bucket: env.get('S3_BUCKET'), region: env.get('S3_REGION') }),
-  },
-})`,
-	);
+	await codemods.makeUsingStub(stubsRoot, "config/archive.stub");
 }
