@@ -10,3 +10,5 @@ coverage/
 .turbo/
 tmp-archive/
 storage/
+# Workstream: local app state, never committed
+.workstream/.local/
