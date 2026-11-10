@@ -25,6 +25,7 @@ import type { S3Config } from "./S3Driver.js";
 import { S3Driver } from "./S3Driver.js";
 import {
 	LocalDriver,
+	type ReleasableSecret,
 	type StorageDriver,
 	StorageManager,
 } from "./StorageManager.js";
@@ -52,8 +53,11 @@ export interface FsServiceOptions {
 	location?: string;
 	/** Storage root (ream alias of `location`). */
 	root?: string;
-	/** HMAC secret enabling `getSignedUrl` on the LocalDriver. */
-	signingSecret?: string;
+	/**
+	 * HMAC secret enabling `getSignedUrl` on the LocalDriver: a string or a
+	 * `Secret`, kept wrapped here and released by the driver.
+	 */
+	signingSecret?: string | ReleasableSecret;
 }
 
 /**

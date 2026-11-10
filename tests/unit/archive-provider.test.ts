@@ -1,3 +1,5 @@
+import { createHmac } from "node:crypto";
+import { Secret } from "@c9up/ream";
 import { describe, expect, it, vi } from "vitest";
 import type { ArchiveAppContext } from "../../src/ArchiveProvider.js";
 import ArchiveProvider from "../../src/ArchiveProvider.js";
@@ -72,6 +74,27 @@ describe("ArchiveProvider", () => {
 		const url = await manager.getSignedUrl("foo.txt");
 		expect(typeof url).toBe("string");
 		expect(url).toContain("foo.txt");
+	});
+
+	it("accepts config.archive.local.signingSecret as a Secret", async () => {
+		// `env.get('APP_KEY')` is a Secret once the env schema says so.
+		const app = buildApp({
+			archive: {
+				driver: "local",
+				local: {
+					root: "./tmp-storage-signed",
+					signingSecret: new Secret("a".repeat(32)),
+				},
+			},
+		});
+		new ArchiveProvider(app).register();
+		const manager = await app.container.resolve<StorageManager>(StorageManager);
+		const url = await manager.getSignedUrl("foo.txt");
+		const parsed = new URL(url, "http://local");
+		const expected = createHmac("sha256", "a".repeat(32))
+			.update(`foo.txt\n${parsed.searchParams.get("exp") ?? ""}`)
+			.digest("hex");
+		expect(parsed.searchParams.get("sig")).toBe(expected);
 	});
 
 	it("falls back to DEFAULT_CONFIG when app.config.get returns undefined", async () => {

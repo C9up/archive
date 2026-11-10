@@ -43,6 +43,7 @@ export {
 	type LocalDriverOptions,
 	type Metadata,
 	type PutStreamOptions,
+	type ReleasableSecret,
 	type SignedUrlOptions,
 	type StorageDriver,
 	type StorageEntry,

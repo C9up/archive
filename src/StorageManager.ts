@@ -258,8 +258,34 @@ export interface LocalDriverOptions {
 	 * When omitted, signing is disabled and `getSignedUrl` throws
 	 * `E_ARCHIVE_SIGNING_DISABLED`. The non-signing methods
 	 * (`put`/`get`/`delete`/`exists`/`url`) work either way.
+	 *
+	 * A string, or a `Secret` (`env.get('APP_KEY')` when the env schema
+	 * declares it with `Env.schema.secret()`), released once by the driver.
 	 */
-	signingSecret?: string;
+	signingSecret?: string | ReleasableSecret;
+}
+
+/** Anything that releases a secret string — an environment `Secret`. */
+export interface ReleasableSecret {
+	release(): string;
+}
+
+/**
+ * The secret as a string, or `undefined` when it is neither a string nor a
+ * Secret wrapping one. Typed configs cannot hand over anything else; the
+ * guard is for an untyped (JavaScript) config, whose `Secret` would otherwise
+ * reach the HMAC as its redacted placeholder text.
+ */
+function releaseSecret(secret: unknown): string | undefined {
+	if (typeof secret === "string") return secret;
+	if (typeof secret === "object" && secret !== null && "release" in secret) {
+		const release: unknown = secret.release;
+		if (typeof release === "function") {
+			const released: unknown = release.call(secret);
+			if (typeof released === "string") return released;
+		}
+	}
+	return undefined;
 }
 
 /**
@@ -291,22 +317,25 @@ export class LocalDriver implements StorageDriver {
 		// Canonicalise the root once so subsequent realpath-based
 		// escape checks compare apples to apples.
 		this.#root = fs.realpathSync(resolved);
-		const secret = options?.signingSecret;
-		if (secret !== undefined) {
+		const configured = options?.signingSecret;
+		let secret: string | null = null;
+		if (configured !== undefined) {
+			const released = releaseSecret(configured);
 			// Empty or trivially short secrets defeat the whole point of
 			// HMAC signing. 16 bytes is the floor: rejects obviously weak
 			// values without being annoyingly strict about format.
-			if (typeof secret !== "string" || secret.length < 16) {
+			if (released === undefined || released.length < 16) {
 				throw new ArchiveError(
 					"E_ARCHIVE_WEAK_SIGNING_SECRET",
-					`LocalDriver signingSecret must be a string of at least 16 chars (got length ${typeof secret === "string" ? secret.length : "non-string"})`,
+					`LocalDriver signingSecret must be a string or a Secret wrapping one, at least 16 chars (got ${released === undefined ? "neither" : `length ${released.length}`})`,
 					{
 						hint: "Use a cryptographically random secret, e.g. `crypto.randomBytes(32).toString('hex')`.",
 					},
 				);
 			}
+			secret = released;
 		}
-		this.#signingSecret = secret ?? null;
+		this.#signingSecret = secret;
 	}
 
 	/**

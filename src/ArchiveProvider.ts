@@ -29,6 +29,7 @@ import { type GcsConfig, GcsDriver } from "./GcsDriver.js";
 import { type S3Config, S3Driver } from "./S3Driver.js";
 import {
 	LocalDriver,
+	type ReleasableSecret,
 	type StorageDriver,
 	StorageManager,
 } from "./StorageManager.js";
@@ -59,7 +60,7 @@ export interface ArchiveAppContext {
  */
 export interface ArchiveConfig {
 	driver: "local" | "s3" | "gcs";
-	local?: { root: string; signingSecret?: string };
+	local?: { root: string; signingSecret?: string | ReleasableSecret };
 	s3?: S3Config;
 	gcs?: GcsConfig;
 }
