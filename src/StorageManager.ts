@@ -16,6 +16,7 @@ import {
 	DEFAULT_EXPIRES_IN,
 	parseExpiry,
 } from "./expiry.js";
+import { normalizeKey, normalizePrefix } from "./keys.js";
 import { inferMimeType } from "./mime-types.js";
 import { DriveDirectory, DriveFile, type FileSnapshot } from "./objects.js";
 
@@ -349,25 +350,39 @@ export class LocalDriver implements StorageDriver {
 	 * is the failure that matters.
 	 */
 	#lexicalPath(filePath: string): string {
-		// Reject control chars that would smuggle HMAC delimiters or
-		// confuse path handling. `\n` (10) is the signing payload
-		// separator — a filename containing `\n` could otherwise forge
-		// `exp`. `\r` (13) and NUL (0) round out the trio.
-		for (let i = 0; i < filePath.length; i++) {
-			const code = filePath.charCodeAt(i);
-			if (code === 0 || code === 10 || code === 13) {
-				throw new Error(
-					"Invalid filePath: control characters (NUL, LF, CR) are not allowed",
-				);
-			}
+		const key = this.#key(filePath);
+		const full = path.resolve(this.#root, key);
+		// Lexical guard, kept behind the normaliser: a normalised key has no
+		// `..` and no leading `/`, but a drive-letter key resolves to an
+		// absolute path on Windows, and a containment check is not where to
+		// rely on one layer only.
+		if (!full.startsWith(this.#root + path.sep)) {
+			throw new ArchiveError(
+				"E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
+				`Path traversal blocked: '${filePath}' resolves outside storage root`,
+				{ hint: "Keys are relative to the disk root." },
+			);
 		}
+		return full;
+	}
+
+	/**
+	 * The normalised key (see `keys.ts`), refused when it names a visibility
+	 * marker.
+	 *
+	 * Control characters are refused by the normaliser; that matters here
+	 * because `\n` is the signing payload separator — a key containing one
+	 * could otherwise forge `exp`.
+	 */
+	#key(filePath: string): string {
+		const key = normalizeKey(filePath);
 		// The visibility markers live beside the files they describe, so a key
 		// naming one would let a caller write, delete or read the marker of
 		// another file — `put("secret.pdf.archive-visibility.json", …)` turned a
 		// private file public. Refused on every segment (a marker name used as a
 		// directory blocks the marker write too) and case-insensitively (the
 		// same file on a case-insensitive filesystem).
-		for (const segment of filePath.split(/[\\/]/)) {
+		for (const segment of key.split("/")) {
 			if (segment.toLowerCase().endsWith(VISIBILITY_SIDECAR_SUFFIX)) {
 				throw new ArchiveError(
 					"E_ARCHIVE_INVALID_KEY",
@@ -376,14 +391,7 @@ export class LocalDriver implements StorageDriver {
 				);
 			}
 		}
-		const full = path.resolve(this.#root, filePath);
-		// Lexical guard — cheap and covers the `..` case.
-		if (!full.startsWith(this.#root + path.sep) && full !== this.#root) {
-			throw new Error(
-				`Path traversal blocked: '${filePath}' resolves outside storage root`,
-			);
-		}
-		return full;
+		return key;
 	}
 
 	/**
@@ -407,8 +415,10 @@ export class LocalDriver implements StorageDriver {
 					!realProbe.startsWith(this.#root + path.sep) &&
 					realProbe !== this.#root
 				) {
-					throw new Error(
+					throw new ArchiveError(
+						"E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
 						`Path traversal blocked: '${filePath}' resolves outside storage root via symlink`,
+						{ hint: "A link inside the disk root points outside it." },
 					);
 				}
 				return full;
@@ -567,7 +577,7 @@ export class LocalDriver implements StorageDriver {
 		// survive the trip through an HTTP layer. The middleware mirrors
 		// this by decoding each segment before recomputing the HMAC —
 		// skipping encoding here would leave the URL unparseable.
-		const encoded = filePath
+		const encoded = this.#key(filePath)
 			.split("/")
 			.map((seg) => encodeURIComponent(seg))
 			.join("/");
@@ -700,8 +710,10 @@ export class LocalDriver implements StorageDriver {
 		// signing a URL reads no file — the read it leads to goes through the
 		// full check. What must NOT be skipped here is the control-character
 		// rejection, since `\n` is this signature's own payload separator, and
-		// `#lexicalPath` is where that lives.
+		// `#lexicalPath` is where that lives. What is signed is the
+		// normalised key, which is what the route recomputes it over.
 		this.#lexicalPath(filePath);
+		const key = this.#key(filePath);
 		const expiresIn = parseExpiry(options?.expiresIn ?? DEFAULT_EXPIRES_IN);
 		assertValidExpiry(expiresIn);
 		const secret = this.#signingSecret;
@@ -718,9 +730,9 @@ export class LocalDriver implements StorageDriver {
 		// Newline-delimited payload: a filePath cannot forge `exp` by
 		// embedding `&exp=...` in its own bytes (URL-decoding still
 		// keeps the literal `\n` separator in the signed material).
-		const message = `${filePath}\n${exp}`;
+		const message = `${key}\n${exp}`;
 		const sig = createHmac("sha256", secret).update(message).digest("hex");
-		return `${this.publicUrl(filePath)}?exp=${exp}&sig=${sig}`;
+		return `${this.publicUrl(key)}?exp=${exp}&sig=${sig}`;
 	}
 
 	/**
@@ -837,8 +849,9 @@ export class LocalDriver implements StorageDriver {
 	async deleteAll(prefix: string): Promise<void> {
 		// Walk the existing listing (already sidecar-aware + safe) and
 		// remove every match. delete() also drops each file's sidecar.
+		const normalized = normalizePrefix(prefix);
 		const paths: string[] = [];
-		for await (const entry of this.list(prefix)) {
+		for await (const entry of this.list(normalized)) {
 			paths.push(entry.path);
 		}
 		for (const p of paths) {
@@ -846,8 +859,8 @@ export class LocalDriver implements StorageDriver {
 		}
 		// Prune the prefix directory itself when it is now empty, mirroring
 		// flydrive's "the folder is deleted" behaviour. Best-effort.
-		const dir = await this.#safePath(prefix);
-		if (dir !== this.#root) {
+		if (normalized !== "") {
+			const dir = await this.#safePath(normalized);
 			try {
 				const stat = await fsp.stat(dir);
 				if (stat.isDirectory() && (await fsp.readdir(dir)).length === 0) {
@@ -866,12 +879,9 @@ export class LocalDriver implements StorageDriver {
 		const recursive = options?.recursive ?? false;
 		const files: DriveFile[] = [];
 		const directories = new Map<string, DriveDirectory>();
+		const given = normalizePrefix(prefix);
 		const normalizedPrefix =
-			prefix === "" || prefix === "/"
-				? ""
-				: prefix.endsWith("/")
-					? prefix
-					: `${prefix}/`;
+			given === "" || given.endsWith("/") ? given : `${given}/`;
 		for await (const entry of this.list(normalizedPrefix)) {
 			if (recursive) {
 				files.push(
@@ -911,7 +921,8 @@ export class LocalDriver implements StorageDriver {
 		};
 	}
 
-	async *list(prefix: string): AsyncIterable<StorageEntry> {
+	async *list(given: string): AsyncIterable<StorageEntry> {
+		const prefix = normalizePrefix(given);
 		// `recursive: true` gives us every descendant in one call;
 		// `withFileTypes: true` lets us skip directories and inspect each
 		// entry without a follow-up stat for type.
@@ -964,6 +975,10 @@ function localPath(source: string | URL): string {
 	return source instanceof URL ? url.fileURLToPath(source) : source;
 }
 
+/**
+ * The disk an application talks to: one driver behind it, and every key
+ * normalised (see `keys.ts`) before that driver sees it, whatever the driver.
+ */
 export class StorageManager {
 	#driver: StorageDriver;
 
@@ -971,12 +986,12 @@ export class StorageManager {
 		this.#driver = driver;
 	}
 
-	put(
+	async put(
 		filePath: string,
 		content: Buffer | string,
 		options?: WriteOptions,
 	): Promise<void> {
-		return this.#driver.put(filePath, content, options);
+		return this.#driver.put(normalizeKey(filePath), content, options);
 	}
 
 	/**
@@ -1022,9 +1037,12 @@ export class StorageManager {
 		destination: string,
 		options?: WriteOptions,
 	): Promise<void> {
+		// Before the source is opened: a destination that is not a valid key
+		// is refused without a descriptor to clean up.
+		const key = normalizeKey(destination);
 		const stream = fs.createReadStream(localPath(source));
 		try {
-			await this.#driver.putStream(destination, stream, options);
+			await this.#driver.putStream(key, stream, options);
 		} catch (error) {
 			// The driver can reject BEFORE reading a byte — a destination outside
 			// the disk is rejected up front. The stream is then never consumed:
@@ -1058,102 +1076,107 @@ export class StorageManager {
 		await fs.promises.unlink(from);
 	}
 
-	putStream(
+	async putStream(
 		filePath: string,
 		readable: NodeJS.ReadableStream,
 		options?: PutStreamOptions,
 	): Promise<void> {
-		return this.#driver.putStream(filePath, readable, options);
+		return this.#driver.putStream(normalizeKey(filePath), readable, options);
 	}
 
-	get(filePath: string): Promise<Buffer | null> {
-		return this.#driver.get(filePath);
+	async get(filePath: string): Promise<Buffer | null> {
+		return this.#driver.get(normalizeKey(filePath));
 	}
 
 	/** Contents as a `Uint8Array`. Throws `E_ARCHIVE_NOT_FOUND` if absent. */
-	getBytes(filePath: string): Promise<Uint8Array> {
-		return this.#driver.getBytes(filePath);
+	async getBytes(filePath: string): Promise<Uint8Array> {
+		return this.#driver.getBytes(normalizeKey(filePath));
 	}
 
 	/** @deprecated AdonisJS Drive alias — use {@link StorageManager.getBytes}. */
-	getArrayBuffer(filePath: string): Promise<Uint8Array> {
-		return this.#driver.getBytes(filePath);
+	async getArrayBuffer(filePath: string): Promise<Uint8Array> {
+		return this.#driver.getBytes(normalizeKey(filePath));
 	}
 
-	getStream(filePath: string): Promise<NodeJS.ReadableStream> {
-		return this.#driver.getStream(filePath);
+	async getStream(filePath: string): Promise<NodeJS.ReadableStream> {
+		return this.#driver.getStream(normalizeKey(filePath));
 	}
 
-	delete(filePath: string): Promise<boolean> {
-		return this.#driver.delete(filePath);
+	async delete(filePath: string): Promise<boolean> {
+		return this.#driver.delete(normalizeKey(filePath));
 	}
 
-	exists(filePath: string): Promise<boolean> {
-		return this.#driver.exists(filePath);
+	async exists(filePath: string): Promise<boolean> {
+		return this.#driver.exists(normalizeKey(filePath));
 	}
 
-	url(filePath: string): Promise<string> {
-		return this.#driver.url(filePath);
+	async url(filePath: string): Promise<string> {
+		return this.#driver.url(normalizeKey(filePath));
 	}
 
 	/** AdonisJS Drive name for {@link url}. */
-	getUrl(filePath: string): Promise<string> {
-		return this.#driver.url(filePath);
+	async getUrl(filePath: string): Promise<string> {
+		return this.#driver.url(normalizeKey(filePath));
 	}
 
 	publicUrl(filePath: string): string {
-		return this.#driver.publicUrl(filePath);
+		return this.#driver.publicUrl(normalizeKey(filePath));
 	}
 
 	getSignedUrl(
 		filePath: string,
 		options?: SignedUrlOptions,
 	): string | Promise<string> {
-		return this.#driver.getSignedUrl(filePath, options);
+		return this.#driver.getSignedUrl(normalizeKey(filePath), options);
 	}
 
 	getSignedUploadUrl(
 		filePath: string,
 		options?: SignedUrlOptions,
 	): string | Promise<string> {
-		return this.#driver.getSignedUploadUrl(filePath, options);
+		return this.#driver.getSignedUploadUrl(normalizeKey(filePath), options);
 	}
 
-	getMetadata(filePath: string): Promise<Metadata> {
-		return this.#driver.getMetadata(filePath);
+	async getMetadata(filePath: string): Promise<Metadata> {
+		return this.#driver.getMetadata(normalizeKey(filePath));
 	}
 
 	/** AdonisJS Drive casing for {@link getMetadata}. */
-	getMetaData(filePath: string): Promise<Metadata> {
-		return this.#driver.getMetadata(filePath);
+	async getMetaData(filePath: string): Promise<Metadata> {
+		return this.#driver.getMetadata(normalizeKey(filePath));
 	}
 
-	getVisibility(filePath: string): Promise<Visibility> {
-		return this.#driver.getVisibility(filePath);
+	async getVisibility(filePath: string): Promise<Visibility> {
+		return this.#driver.getVisibility(normalizeKey(filePath));
 	}
 
-	setVisibility(filePath: string, visibility: Visibility): Promise<void> {
-		return this.#driver.setVisibility(filePath, visibility);
+	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
+		return this.#driver.setVisibility(normalizeKey(filePath), visibility);
 	}
 
-	copy(from: string, to: string, options?: WriteOptions): Promise<void> {
-		return this.#driver.copy(from, to, options);
+	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
+		return this.#driver.copy(normalizeKey(from), normalizeKey(to), options);
 	}
 
-	move(from: string, to: string, options?: WriteOptions): Promise<void> {
-		return this.#driver.move(from, to, options);
+	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
+		return this.#driver.move(normalizeKey(from), normalizeKey(to), options);
 	}
 
-	deleteAll(prefix: string): Promise<void> {
-		return this.#driver.deleteAll(prefix);
+	async deleteAll(prefix: string): Promise<void> {
+		return this.#driver.deleteAll(normalizePrefix(prefix));
 	}
 
 	list(prefix: string): AsyncIterable<StorageEntry> {
-		return this.#driver.list(prefix);
+		// Validated now, not on the first iteration: a refused prefix is the
+		// caller's mistake and should surface where the call was made.
+		return this.#driver.list(normalizePrefix(prefix));
 	}
 
 	/** AdonisJS Drive `listAll` — paged {@link DriveFile}/{@link DriveDirectory}. */
-	listAll(prefix: string, options?: ListAllOptions): Promise<ListAllResult> {
-		return this.#driver.listAll(prefix, options);
+	async listAll(
+		prefix: string,
+		options?: ListAllOptions,
+	): Promise<ListAllResult> {
+		return this.#driver.listAll(normalizePrefix(prefix), options);
 	}
 }

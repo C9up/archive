@@ -13,6 +13,8 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 import * as path from "node:path";
+import { ArchiveError } from "./errors.js";
+import { normalizeKey } from "./keys.js";
 import { inferMimeType } from "./mime-types.js";
 import type { LocalDriver, StorageManager } from "./StorageManager.js";
 
@@ -101,13 +103,23 @@ export function createSignedRouteHandler(
 		// path segment; we decode here before recomputing the HMAC.
 		const encodedPath = reqPath.slice(prefix.length).replace(/^\//, "");
 		if (encodedPath === "") return next();
-		let filePath: string;
+		let decoded: string;
 		try {
-			filePath = decodeSegments(encodedPath);
+			decoded = decodeSegments(encodedPath);
 		} catch {
 			ctx.response.status(403).json({
 				error: { code: "E_INVALID_SIGNATURE", message: "Malformed path" },
 			});
+			return;
+		}
+		// The key the signer signed is the normalised one; a path that does
+		// not normalise (`..`, an encoded separator, a control character) names
+		// nothing this route will serve.
+		let filePath: string;
+		try {
+			filePath = normalizeKey(decoded);
+		} catch {
+			invalidKey(ctx);
 			return;
 		}
 
@@ -126,8 +138,22 @@ export function createSignedRouteHandler(
 			// 403 here, as every other refusal of this route already was: no
 			// credential the client could add makes a private file servable
 			// without a signature.
-			if (!(await storage.exists(filePath))) return next();
-			if ((await storage.getVisibility(filePath)) !== "public") {
+			let visibility: "public" | "private" | undefined;
+			try {
+				if (await storage.exists(filePath)) {
+					visibility = await storage.getVisibility(filePath);
+				}
+			} catch (err) {
+				// A name the disk refuses (a visibility marker's) is answered,
+				// not thrown into the application's error handler.
+				if (isKeyError(err)) {
+					invalidKey(ctx);
+					return;
+				}
+				throw err;
+			}
+			if (visibility === undefined) return next();
+			if (visibility !== "public") {
 				ctx.response.status(403).json({
 					error: { code: "E_ARCHIVE_ACCESS_DENIED", message: "Access denied" },
 				});
@@ -224,6 +250,23 @@ export function createSignedRouteHandler(
 	}
 }
 
+/** The refusals a disk raises for a key it will not address. */
+const KEY_ERRORS = new Set([
+	"E_ARCHIVE_INVALID_KEY",
+	"E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
+	"E_ARCHIVE_UNALLOWED_CHARACTERS",
+]);
+
+function isKeyError(err: unknown): boolean {
+	return err instanceof ArchiveError && KEY_ERRORS.has(err.code);
+}
+
+function invalidKey(ctx: SignedRouteHttpContext): void {
+	ctx.response.status(403).json({
+		error: { code: "E_ARCHIVE_INVALID_KEY", message: "Invalid path" },
+	});
+}
+
 /**
  * Read the parsed query object from the HttpContext. Matches Ream's
  * `Request.qs()` contract (object). Returns an empty object when the
@@ -249,11 +292,19 @@ function readStringParam(
 /**
  * Decode each URL-encoded path segment. Throws if any segment
  * contains invalid percent-escapes (`decodeURIComponent` throws on
- * malformed input).
+ * malformed input), or decodes to a separator: the signer encodes each
+ * segment on its own, so an encoded `/` or `\` never comes from a URL it
+ * built, and would let one request segment pose as two.
  */
 function decodeSegments(encodedPath: string): string {
 	return encodedPath
 		.split("/")
-		.map((seg) => decodeURIComponent(seg))
+		.map((seg) => {
+			const decoded = decodeURIComponent(seg);
+			if (/[/\\]/.test(decoded)) {
+				throw new Error("encoded separator in a path segment");
+			}
+			return decoded;
+		})
 		.join("/");
 }

@@ -237,7 +237,7 @@ describe("archive > the local disk", () => {
 		it("blocks a path that climbs out of the root", async () => {
 			await expect(
 				driver.put("../escaped.txt", Buffer.from("x")),
-			).rejects.toThrow(/Path traversal blocked/);
+			).rejects.toMatchObject({ code: "E_ARCHIVE_PATH_TRAVERSAL_DETECTED" });
 		});
 	});
 });

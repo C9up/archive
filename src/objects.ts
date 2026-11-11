@@ -10,6 +10,7 @@
  */
 
 import { basename } from "node:path";
+import { normalizeKey } from "./keys.js";
 import type {
 	Metadata,
 	SignedUrlOptions,
@@ -57,8 +58,10 @@ export class DriveFile {
 	#metadata?: Metadata;
 
 	constructor(key: string, driver: StorageDriver, metadata?: Metadata) {
-		this.key = key;
-		this.name = basename(key);
+		// Normalised like every key a disk accepts, so a handle built from a
+		// stored snapshot or an untrusted name cannot address outside the disk.
+		this.key = normalizeKey(key);
+		this.name = basename(this.key);
 		this.#driver = driver;
 		this.#metadata = metadata;
 	}

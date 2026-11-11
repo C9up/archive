@@ -20,6 +20,7 @@ import {
 	DEFAULT_EXPIRES_IN,
 	parseExpiry,
 } from "./expiry.js";
+import { normalizeKey, normalizePrefix } from "./keys.js";
 import { DriveDirectory, DriveFile } from "./objects.js";
 import { fetchWithIdleTimeout } from "./provider-fetch.js";
 import type {
@@ -55,9 +56,14 @@ function s3StrictEncode(str: string): string {
  * URI-encode an S3 object key per AWS SigV4 rules: encode each path segment
  * individually but preserve `/` separators. Handles spaces, unicode, `#`, `?`, `%`
  * as well as the strict AWS set (`! * ' ( )`).
+ *
+ * Every object URL is built through here, so this is where a key is
+ * normalised (see `keys.ts`) when the driver is used without a manager in
+ * front: `..` never reaches a URL, where it would resolve into another
+ * bucket on the same host.
  */
 function s3EncodeKey(key: string): string {
-	return key.split("/").map(s3StrictEncode).join("/");
+	return normalizeKey(key).split("/").map(s3StrictEncode).join("/");
 }
 
 export interface S3Config {
@@ -564,7 +570,8 @@ export class S3Driver implements StorageDriver {
 		await this.delete(from);
 	}
 
-	async deleteAll(prefix: string): Promise<void> {
+	async deleteAll(given: string): Promise<void> {
+		const prefix = normalizePrefix(given);
 		// List one page at a time and batch-delete (up to 1000 keys per
 		// DeleteObjects call) until the bucket is drained of the prefix.
 		let continuationToken: string | undefined;
@@ -641,12 +648,13 @@ export class S3Driver implements StorageDriver {
 	}
 
 	async listAll(
-		prefix: string,
+		given: string,
 		options?: ListAllOptions,
 	): Promise<ListAllResult> {
 		const recursive = options?.recursive ?? false;
+		const prefix = normalizePrefix(given);
 		const normalizedPrefix =
-			prefix === "" || prefix === "/"
+			prefix === ""
 				? ""
 				: !recursive && !prefix.endsWith("/")
 					? `${prefix}/`
@@ -718,7 +726,8 @@ export class S3Driver implements StorageDriver {
 		};
 	}
 
-	async *list(prefix: string): AsyncIterable<StorageEntry> {
+	async *list(given: string): AsyncIterable<StorageEntry> {
+		const prefix = normalizePrefix(given);
 		let continuationToken: string | undefined;
 		do {
 			const qp: Array<[string, string]> = [
@@ -827,7 +836,8 @@ export class S3Driver implements StorageDriver {
 			.join("&");
 		const canonicalRequest = [
 			method,
-			`/${this.#config.bucket}/${s3EncodeKey(key)}`,
+			// `key` is empty for a bucket-level request (list, batch delete).
+			`/${this.#config.bucket}/${key === "" ? "" : s3EncodeKey(key)}`,
 			canonicalQuery,
 			canonicalHeaders,
 			signedHeaders,

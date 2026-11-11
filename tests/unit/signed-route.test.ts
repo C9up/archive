@@ -198,6 +198,23 @@ describe("createSignedRouteHandler", () => {
 		}
 	});
 
+	it("answers a path the disk will not address with 403, not an exception", async () => {
+		await storage.put("secret.pdf", "top secret", { visibility: "private" });
+		for (const target of [
+			"/storage/a/%2e%2e/secret.pdf",
+			"/storage/a/../secret.pdf",
+			"/storage/a%2fsecret.pdf",
+			"/storage/secret.pdf.archive-visibility.json",
+		]) {
+			const { ctx, response } = buildCtx("GET", target);
+			const next = vi.fn(async () => {});
+			await middleware(ctx, next);
+			expect(next, target).not.toHaveBeenCalled();
+			expect(response.status, target).toHaveBeenCalledWith(403);
+			expect(response.sendBuffer, target).not.toHaveBeenCalled();
+		}
+	});
+
 	it("serves an unsigned request for a public file itself", async () => {
 		await storage.put("cat.txt", "hello");
 		const { ctx, response } = buildCtx("GET", "/storage/cat.txt");

@@ -22,6 +22,7 @@ import {
 	DEFAULT_EXPIRES_IN,
 	parseExpiry,
 } from "./expiry.js";
+import { normalizeKey, normalizePrefix } from "./keys.js";
 import { inferMimeType } from "./mime-types.js";
 import { DriveDirectory, DriveFile } from "./objects.js";
 import { fetchWithIdleTimeout } from "./provider-fetch.js";
@@ -55,7 +56,7 @@ function gcsStrictEncode(str: string): string {
  * `/` is not among them, so encoding it there would break every signature.
  */
 function gcsEncodeKey(key: string): string {
-	return key.split("/").map(gcsStrictEncode).join("/");
+	return normalizeKey(key).split("/").map(gcsStrictEncode).join("/");
 }
 
 /**
@@ -66,9 +67,13 @@ function gcsEncodeKey(key: string): string {
  * makes the request address a different resource, which answers 404. Since
  * `exists()` and `delete()` read a 404 as "not there", every object inside a
  * prefix would silently look absent.
+ *
+ * Both encoders normalise the key first (see `keys.ts`): every object URL is
+ * built through one of them, so a `..` never reaches the provider even when
+ * the driver is used without a manager in front.
  */
 function gcsEncodeObjectName(key: string): string {
-	return gcsStrictEncode(key);
+	return gcsStrictEncode(normalizeKey(key));
 }
 
 /** Type guard matching the same pattern as `S3Driver.hasDestroy` —
@@ -161,8 +166,8 @@ export class GcsDriver implements StorageDriver {
 		options?: WriteOptions,
 	): Promise<void> {
 		const body = typeof content === "string" ? Buffer.from(content) : content;
+		const url = `${GCS_UPLOAD_ROOT}/b/${this.#config.bucket}/o?uploadType=media&name=${gcsEncodeObjectName(filePath)}`;
 		const token = await this.#getAccessToken();
-		const url = `${GCS_UPLOAD_ROOT}/b/${this.#config.bucket}/o?uploadType=media&name=${gcsStrictEncode(filePath)}`;
 		const mime =
 			options?.contentType ??
 			(inferMimeType(extFromPath(filePath)) || "application/octet-stream");
@@ -211,9 +216,9 @@ export class GcsDriver implements StorageDriver {
 		// deferred — document upgrade path here when a real large-file
 		// case appears.
 		const maxBytes = options?.contentLength ?? Number.MAX_SAFE_INTEGER;
+		const url = `${GCS_UPLOAD_ROOT}/b/${this.#config.bucket}/o?uploadType=media&name=${gcsEncodeObjectName(filePath)}`;
 		const buf = await collectToBuffer(readable, maxBytes);
 		const token = await this.#getAccessToken();
-		const url = `${GCS_UPLOAD_ROOT}/b/${this.#config.bucket}/o?uploadType=media&name=${gcsStrictEncode(filePath)}`;
 		const mime =
 			options?.contentType ??
 			(inferMimeType(extFromPath(filePath)) || "application/octet-stream");
@@ -231,8 +236,8 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async get(filePath: string): Promise<Buffer | null> {
-		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}?alt=media`;
+		const token = await this.#getAccessToken();
 		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
@@ -243,8 +248,8 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async getStream(filePath: string): Promise<NodeJS.ReadableStream> {
-		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}?alt=media`;
+		const token = await this.#getAccessToken();
 		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
@@ -264,8 +269,8 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async delete(filePath: string): Promise<boolean> {
-		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}`;
+		const token = await this.#getAccessToken();
 		const res = await this.#fetch(url, {
 			method: "DELETE",
 			headers: { authorization: `Bearer ${token}` },
@@ -275,8 +280,8 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async exists(filePath: string): Promise<boolean> {
-		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}`;
+		const token = await this.#getAccessToken();
 		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
@@ -305,8 +310,8 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async getMetadata(filePath: string): Promise<Metadata> {
-		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}`;
+		const token = await this.#getAccessToken();
 		const res = await this.#fetch(url, {
 			method: "GET",
 			headers: { authorization: `Bearer ${token}` },
@@ -355,8 +360,8 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
-		const token = await this.#getAccessToken();
 		const base = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}/acl`;
+		const token = await this.#getAccessToken();
 		if (visibility === "public") {
 			const res = await this.#fetch(base, {
 				method: "POST",
@@ -386,8 +391,8 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
-		const token = await this.#getAccessToken();
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(from)}/copyTo/b/${this.#config.bucket}/o/${gcsEncodeObjectName(to)}`;
+		const token = await this.#getAccessToken();
 		const res = await this.#fetch(url, {
 			method: "POST",
 			headers: { authorization: `Bearer ${token}` },
@@ -413,7 +418,8 @@ export class GcsDriver implements StorageDriver {
 		await this.delete(from);
 	}
 
-	async deleteAll(prefix: string): Promise<void> {
+	async deleteAll(given: string): Promise<void> {
+		const prefix = normalizePrefix(given);
 		// GCS has no batch-delete endpoint; drain the listing one object at
 		// a time. `list()` already paginates lazily.
 		const keys: string[] = [];
@@ -426,12 +432,13 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async listAll(
-		prefix: string,
+		given: string,
 		options?: ListAllOptions,
 	): Promise<ListAllResult> {
 		const recursive = options?.recursive ?? false;
+		const prefix = normalizePrefix(given);
 		const normalizedPrefix =
-			prefix === "" || prefix === "/"
+			prefix === ""
 				? ""
 				: !recursive && !prefix.endsWith("/")
 					? `${prefix}/`
@@ -483,7 +490,8 @@ export class GcsDriver implements StorageDriver {
 		return { paginationToken: json.nextPageToken, objects };
 	}
 
-	async *list(prefix: string): AsyncIterable<StorageEntry> {
+	async *list(given: string): AsyncIterable<StorageEntry> {
+		const prefix = normalizePrefix(given);
 		let pageToken: string | undefined;
 		do {
 			const params = new URLSearchParams({ prefix });
