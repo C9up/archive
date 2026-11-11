@@ -176,13 +176,13 @@ describe("LocalDriver", () => {
 			await driver.setVisibility("cat.txt", "private");
 			const meta = await driver.getMetadata("cat.txt");
 			expect(meta.visibility).toBe("private");
-			// Sidecar file is present on disk but not visible through exists()
+			// Sidecar file is present on disk but not addressable as a key
 			expect(
 				fs.existsSync(path.join(root, "cat.txt.archive-visibility.json")),
 			).toBe(true);
-			expect(await driver.exists("cat.txt.archive-visibility.json")).toBe(
-				false,
-			);
+			await expect(
+				driver.exists("cat.txt.archive-visibility.json"),
+			).rejects.toMatchObject({ code: "E_ARCHIVE_INVALID_KEY" });
 		});
 
 		it("setVisibility is idempotent", async () => {

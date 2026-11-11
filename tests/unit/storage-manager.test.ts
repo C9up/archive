@@ -296,9 +296,48 @@ describe("archive > LocalDriver > security guards", () => {
 		);
 	});
 
-	it("exists() returns false for sidecar file paths regardless of state", async () => {
-		await driver.put("y.txt", "1");
-		await driver.setVisibility("y.txt", "private");
-		expect(await driver.exists("y.txt.archive-visibility.json")).toBe(false);
+	it("keeps the visibility markers out of the key namespace", async () => {
+		await storage.put("secret.pdf", "top secret", { visibility: "private" });
+		await storage.put("pub.json", JSON.stringify({ visibility: "public" }));
+		const sidecar = "secret.pdf.archive-visibility.json";
+		const invalid = { code: "E_ARCHIVE_INVALID_KEY" };
+
+		// Every way of writing, removing or reading the marker through a key
+		// that a client may control is refused.
+		await expect(
+			storage.put(sidecar, JSON.stringify({ visibility: "public" })),
+		).rejects.toMatchObject(invalid);
+		await expect(
+			storage.putStream(sidecar, Readable.from(["{}"])),
+		).rejects.toMatchObject(invalid);
+		await expect(storage.delete(sidecar)).rejects.toMatchObject(invalid);
+		await expect(storage.copy("pub.json", sidecar)).rejects.toMatchObject(
+			invalid,
+		);
+		await expect(storage.move("pub.json", sidecar)).rejects.toMatchObject(
+			invalid,
+		);
+		await expect(storage.get(sidecar)).rejects.toMatchObject(invalid);
+		await expect(storage.getStream(sidecar)).rejects.toMatchObject(invalid);
+		await expect(storage.exists(sidecar)).rejects.toMatchObject(invalid);
+		await expect(storage.getMetadata(sidecar)).rejects.toMatchObject(invalid);
+		await expect(
+			storage.setVisibility(sidecar, "public"),
+		).rejects.toMatchObject(invalid);
+		expect(() => storage.getSignedUrl(sidecar)).toThrow(
+			expect.objectContaining(invalid),
+		);
+		// Case variants and a marker name used as a directory are the same
+		// namespace on a case-insensitive filesystem / for the sidecar write.
+		await expect(
+			storage.put("secret.pdf.ARCHIVE-VISIBILITY.JSON", "{}"),
+		).rejects.toMatchObject(invalid);
+		await expect(
+			storage.put("other.pdf.archive-visibility.json/x", "{}"),
+		).rejects.toMatchObject(invalid);
+
+		// The marker itself is untouched: the file is still private.
+		expect(await storage.getVisibility("secret.pdf")).toBe("private");
+		expect(await storage.url("secret.pdf")).toMatch(/\?exp=\d+&sig=/);
 	});
 });

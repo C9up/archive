@@ -361,6 +361,21 @@ export class LocalDriver implements StorageDriver {
 				);
 			}
 		}
+		// The visibility markers live beside the files they describe, so a key
+		// naming one would let a caller write, delete or read the marker of
+		// another file — `put("secret.pdf.archive-visibility.json", …)` turned a
+		// private file public. Refused on every segment (a marker name used as a
+		// directory blocks the marker write too) and case-insensitively (the
+		// same file on a case-insensitive filesystem).
+		for (const segment of filePath.split(/[\\/]/)) {
+			if (segment.toLowerCase().endsWith(VISIBILITY_SIDECAR_SUFFIX)) {
+				throw new ArchiveError(
+					"E_ARCHIVE_INVALID_KEY",
+					`Invalid key '${filePath}': names ending in '${VISIBILITY_SIDECAR_SUFFIX}' are reserved for visibility markers`,
+					{ hint: "Store the object under a name without that suffix." },
+				);
+			}
+		}
 		const full = path.resolve(this.#root, filePath);
 		// Lexical guard — cheap and covers the `..` case.
 		if (!full.startsWith(this.#root + path.sep) && full !== this.#root) {
@@ -543,9 +558,7 @@ export class LocalDriver implements StorageDriver {
 	}
 
 	async exists(filePath: string): Promise<boolean> {
-		// Sidecars are an implementation detail — pretend they don't
-		// exist from the public API's point of view.
-		if (filePath.endsWith(VISIBILITY_SIDECAR_SUFFIX)) return false;
+		// A marker name is refused by the path guard, as by every other method.
 		return exists(await this.#safePath(filePath));
 	}
 
