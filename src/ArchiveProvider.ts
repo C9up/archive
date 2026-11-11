@@ -5,7 +5,9 @@
  * `archive` config key.
  *
  * Duck-typed against `ArchiveAppContext` so archive does NOT import
- * `@c9up/ream` — keeps the package publishable standalone.
+ * `@c9up/ream` statically — keeps the package publishable standalone. At
+ * boot it gives ream's uploads `moveToDisk(key, disk?, options?)` when ream
+ * is installed (see `move-to-disk.ts`).
  *
  * @example
  *   // reamrc.ts
@@ -26,6 +28,7 @@ import { type DriveConfig, DriveManager } from "./DriveManager.js";
 import { ArchiveError } from "./errors.js";
 
 import { type GcsConfig, GcsDriver } from "./GcsDriver.js";
+import { extendMultipartFile } from "./move-to-disk.js";
 import { type S3Config, S3Driver } from "./S3Driver.js";
 import {
 	LocalDriver,
@@ -151,6 +154,10 @@ export default class ArchiveProvider {
 		// however storage is reached there is one manager behind it.
 		setStorageResolver(storage);
 		await this.#registerViewHelpers();
+		// Lazy like the helpers: the macro resolves the disk when an upload is
+		// moved, so an unconfigured app builds nothing here.
+		const drive = this.#drive;
+		if (drive !== undefined) await extendMultipartFile(drive);
 
 		// No eager construction when archive is unconfigured: an app that
 		// registers this provider and never uses storage should not trigger

@@ -15,11 +15,34 @@
  * simply inert.
  */
 
-// Referenced so the augmentation below resolves the module it augments.
+// Referenced so the augmentations below resolve the modules they augment.
+import type {} from "@c9up/ream";
 import type {} from "@c9up/ream/types";
 
 import type { DriveManager } from "./DriveManager.js";
+import type { MoveToDiskOptions } from "./move-to-disk.js";
 import type { StorageManager } from "./StorageManager.js";
+
+declare module "@c9up/ream" {
+	interface MultipartFile {
+		/**
+		 * Write the upload into a disk (the default one when `disk` is
+		 * omitted), set `meta.url` to its URL when the disk can name one, and
+		 * mark the file as moved under its key.
+		 *
+		 * Attached by `ArchiveProvider` at boot. The key is normalised like any
+		 * other: a `..` segment or a backslash is refused before anything is
+		 * written.
+		 */
+		moveToDisk(
+			key: string,
+			disk?: string,
+			options?: MoveToDiskOptions,
+		): Promise<void>;
+		/** Same, on the default disk. */
+		moveToDisk(key: string, options?: MoveToDiskOptions): Promise<void>;
+	}
+}
 
 declare module "@c9up/ream/types" {
 	interface ContainerBindings {
