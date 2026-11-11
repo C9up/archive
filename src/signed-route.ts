@@ -57,8 +57,13 @@ export interface SignedRouteOptions {
 	 * recompute the expected signature.
 	 */
 	driver: LocalDriver;
-	/** URL prefix for signed file serving (default: `/storage`). Must
-	 *  match the prefix used by `LocalDriver.url()`. */
+	/**
+	 * URL prefix for file serving. Defaults to — and must equal — the
+	 * driver's `routeBasePath` (`driver.getRouteBasePath()`), which is what
+	 * its URLs are built on. Configure the path on the driver; a different
+	 * value here is refused at construction (`E_ARCHIVE_PREFIX_MISMATCH`)
+	 * rather than producing a route that can never match a signed URL.
+	 */
 	prefix?: string;
 }
 
@@ -74,10 +79,17 @@ type SignedRouteMiddleware = (
 export function createSignedRouteHandler(
 	options: SignedRouteOptions,
 ): SignedRouteMiddleware {
-	const prefix = options.prefix ?? "/storage";
-	if (prefix === "") {
-		throw new Error(
-			"createSignedRouteHandler: prefix cannot be empty. Use '/storage' (default) or a specific path.",
+	const prefix = options.driver.getRouteBasePath();
+	if (
+		options.prefix !== undefined &&
+		options.prefix.replace(/\/+$/, "") !== prefix
+	) {
+		throw new ArchiveError(
+			"E_ARCHIVE_PREFIX_MISMATCH",
+			`createSignedRouteHandler: prefix '${options.prefix}' does not match the driver's routeBasePath '${prefix}', so no URL the driver signs would ever reach this route.`,
+			{
+				hint: "Set routeBasePath on the LocalDriver (or services.fs) and leave prefix out.",
+			},
 		);
 	}
 	const secret = options.driver.getSigningSecret();

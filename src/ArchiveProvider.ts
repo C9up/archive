@@ -60,7 +60,11 @@ export interface ArchiveAppContext {
  */
 export interface ArchiveConfig {
 	driver: "local" | "s3" | "gcs";
-	local?: { root: string; signingSecret?: string | ReleasableSecret };
+	local?: {
+		root: string;
+		signingSecret?: string | ReleasableSecret;
+		routeBasePath?: string;
+	};
 	s3?: S3Config;
 	gcs?: GcsConfig;
 }
@@ -231,6 +235,7 @@ function buildDriver(config: ArchiveConfig): StorageDriver {
 		const root = config.local?.root ?? "./storage";
 		return new LocalDriver(root, {
 			signingSecret: config.local?.signingSecret,
+			routeBasePath: config.local?.routeBasePath,
 		});
 	}
 	// Reject unknown driver values explicitly so a typo like

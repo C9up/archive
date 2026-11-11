@@ -58,15 +58,22 @@ export interface FsServiceOptions {
 	 * `Secret`, kept wrapped here and released by the driver.
 	 */
 	signingSecret?: string | ReleasableSecret;
+	/**
+	 * URL path the disk's files are served under (default `/storage`): the
+	 * driver's URLs and the signed route both derive from it.
+	 */
+	routeBasePath?: string;
 }
 
 /**
  * Config helpers mirroring AdonisJS Drive's `services.fs/s3/gcs`. Each
  * returns a factory consumed by {@link DriveConfig.services}.
  *
- * DIVERGENCE (documented, deliberate): the ream `services.fs` builds URLs
- * in-package via the LocalDriver + signed-route handler — it does NOT
- * couple to the ream router the way Adonis wires `serveFiles`/`routeBasePath`.
+ * NAMED DEVIATION: the ream `services.fs` builds URLs in-package via the
+ * LocalDriver + signed-route handler — it does NOT couple to the router,
+ * so there is no `serveFiles` that registers the route for you. Its
+ * `routeBasePath` plays the upstream role all the same: the driver's URLs
+ * and the signed route's prefix both derive from it.
  */
 export const services: {
 	fs(options?: FsServiceOptions): DriveServiceFactory;
@@ -76,7 +83,10 @@ export const services: {
 	fs(options) {
 		const root = options?.location ?? options?.root ?? "./storage";
 		return () =>
-			new LocalDriver(root, { signingSecret: options?.signingSecret });
+			new LocalDriver(root, {
+				signingSecret: options?.signingSecret,
+				routeBasePath: options?.routeBasePath,
+			});
 	},
 	s3(config) {
 		return () => new S3Driver(config);

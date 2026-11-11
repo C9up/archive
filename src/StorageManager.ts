@@ -264,6 +264,13 @@ export interface LocalDriverOptions {
 	 * declares it with `Env.schema.secret()`), released once by the driver.
 	 */
 	signingSecret?: string | ReleasableSecret;
+	/**
+	 * The URL path files are served under (default `/storage`). `publicUrl`,
+	 * `url` and `getSignedUrl` build on it, and the signed route reads it from
+	 * the driver, so the URLs handed out and the route serving them cannot
+	 * disagree. A trailing `/` is dropped.
+	 */
+	routeBasePath?: string;
 }
 
 /** Anything that releases a secret string — an environment `Secret`. */
@@ -298,9 +305,29 @@ function releaseSecret(secret: unknown): string | undefined {
  */
 const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 
+/**
+ * A route base path, without its trailing `/`. Refused unless it is an
+ * absolute URL path with at least one segment and nothing a URL would read
+ * as a query, a fragment or a break.
+ */
+function routeBasePath(given: string): string {
+	const trimmed = given.replace(/\/+$/, "");
+	if (!/^(\/[^/?#\s]+)+$/.test(trimmed)) {
+		throw new ArchiveError(
+			"E_ARCHIVE_INVALID_ROUTE_BASE_PATH",
+			`LocalDriver routeBasePath must be an absolute URL path such as '/storage', got ${JSON.stringify(given)}`,
+			{
+				hint: "Start it with '/', name at least one segment, and leave out '?', '#' and whitespace.",
+			},
+		);
+	}
+	return trimmed;
+}
+
 export class LocalDriver implements StorageDriver {
 	#root: string;
 	#signingSecret: string | null;
+	#routeBasePath: string;
 
 	/**
 	 * The only synchronous filesystem access left in this driver, and the only
@@ -311,6 +338,9 @@ export class LocalDriver implements StorageDriver {
 	 * request in the process for its whole duration.
 	 */
 	constructor(root: string, options?: LocalDriverOptions) {
+		// Validated before the root is created: a refused config leaves
+		// nothing behind on disk.
+		this.#routeBasePath = routeBasePath(options?.routeBasePath ?? "/storage");
 		const resolved = path.resolve(root);
 		if (!fs.existsSync(resolved)) {
 			fs.mkdirSync(resolved, { recursive: true });
@@ -581,7 +611,16 @@ export class LocalDriver implements StorageDriver {
 			.split("/")
 			.map((seg) => encodeURIComponent(seg))
 			.join("/");
-		return `/storage/${encoded}`;
+		return `${this.#routeBasePath}/${encoded}`;
+	}
+
+	/**
+	 * The URL path this driver's files are served under. The signed route
+	 * reads it, so the URLs this driver builds and the route that serves them
+	 * derive from one value.
+	 */
+	getRouteBasePath(): string {
+		return this.#routeBasePath;
 	}
 
 	async url(filePath: string): Promise<string> {

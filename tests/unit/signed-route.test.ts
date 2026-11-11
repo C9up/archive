@@ -4,9 +4,11 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createSignedRouteHandler,
+	DriveManager,
 	LocalDriver,
 	StaticMiddleware,
 	StorageManager,
+	services,
 } from "../../src/index.js";
 import type {
 	SignedRouteHttpContext,
@@ -272,6 +274,71 @@ describe("createSignedRouteHandler", () => {
 		const next = vi.fn(async () => {});
 		await middleware(ctx, next);
 		expect(next).toHaveBeenCalledTimes(1);
+	});
+
+	it("serves the URLs a driver signs under its own route base path", async () => {
+		const filesDriver = new LocalDriver(root, {
+			signingSecret: "s3cr3t-s3cr3t-s3cr3t",
+			routeBasePath: "/files/",
+		});
+		await filesDriver.put("cat.txt", "hello");
+		expect(filesDriver.getRouteBasePath()).toBe("/files");
+		expect(filesDriver.publicUrl("cat.txt")).toBe("/files/cat.txt");
+		const url = filesDriver.getSignedUrl("cat.txt");
+		expect(url.startsWith("/files/cat.txt?exp=")).toBe(true);
+
+		// One value drives both: the route takes the driver's prefix.
+		const handler = createSignedRouteHandler({
+			storage: new StorageManager(filesDriver),
+			driver: filesDriver,
+		});
+		const { ctx, response } = buildCtx("GET", url);
+		const next = vi.fn(async () => {});
+		await handler(ctx, next);
+		expect(next).not.toHaveBeenCalled();
+		expect(response.status).toHaveBeenCalledWith(200);
+	});
+
+	it("takes the route base path from the disk config", () => {
+		const drive = new DriveManager({
+			default: "files",
+			services: {
+				files: services.fs({ location: root, routeBasePath: "/files" }),
+			},
+		});
+		expect(drive.use().publicUrl("a.txt")).toBe("/files/a.txt");
+	});
+
+	it("refuses a route prefix the driver does not sign under", () => {
+		const filesDriver = new LocalDriver(root, {
+			signingSecret: "s3cr3t-s3cr3t-s3cr3t",
+			routeBasePath: "/files",
+		});
+		expect(() =>
+			createSignedRouteHandler({
+				storage: new StorageManager(filesDriver),
+				driver: filesDriver,
+				prefix: "/storage",
+			}),
+		).toThrow(expect.objectContaining({ code: "E_ARCHIVE_PREFIX_MISMATCH" }));
+	});
+
+	it("refuses a route base path that is not an absolute URL path", () => {
+		for (const routeBasePath of [
+			"",
+			"/",
+			"files",
+			"/files?x=1",
+			"/a#b",
+			"/a b",
+		]) {
+			expect(
+				() => new LocalDriver(root, { routeBasePath }),
+				routeBasePath,
+			).toThrow(
+				expect.objectContaining({ code: "E_ARCHIVE_INVALID_ROUTE_BASE_PATH" }),
+			);
+		}
 	});
 
 	it("throws at construction time if the driver has no signing secret", () => {
