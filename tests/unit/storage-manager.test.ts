@@ -300,6 +300,51 @@ describe("archive > LocalDriver > security guards", () => {
 		);
 	});
 
+	it("keeps an absolute key inside the root", async () => {
+		// `path.resolve(root, "/abs/x")` is `/abs/x`: the simplest escape of
+		// all, if the key reached the resolver as given. It is a key relative
+		// to the disk like any other.
+		const outside = await fsp.mkdtemp(path.join(os.tmpdir(), "storage-abs-"));
+		try {
+			const absolute = path.join(outside, "x.txt");
+			await driver.put(absolute, "inside");
+			await expect(fsp.access(absolute)).rejects.toMatchObject({
+				code: "ENOENT",
+			});
+			expect(await fsp.readFile(path.join(root, absolute), "utf8")).toBe(
+				"inside",
+			);
+			expect((await driver.get(absolute))?.toString()).toBe("inside");
+		} finally {
+			await fsp.rm(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a key that climbs into a sibling sharing the root's name", async () => {
+		// `<root>2/x` starts with the characters of `<root>`: a containment
+		// check without the trailing separator lets it through.
+		const sibling = `${root}2`;
+		await fsp.mkdir(sibling);
+		try {
+			const key = path.join("..", `${path.basename(root)}2`, "x.txt");
+			await expect(driver.put(key, "x")).rejects.toMatchObject({
+				code: "E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
+			});
+			// The same sibling reached through a link planted inside the root
+			// is the case only the separator-aware check stops.
+			await fsp.symlink(sibling, path.join(root, "link"));
+			await expect(driver.put("link/x.txt", "x")).rejects.toMatchObject({
+				code: "E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
+			});
+			await expect(driver.get("link/x.txt")).rejects.toMatchObject({
+				code: "E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
+			});
+			expect(await fsp.readdir(sibling)).toEqual([]);
+		} finally {
+			await fsp.rm(sibling, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps the visibility markers out of the key namespace", async () => {
 		await storage.put("secret.pdf", "top secret", { visibility: "private" });
 		await storage.put("pub.json", JSON.stringify({ visibility: "public" }));
