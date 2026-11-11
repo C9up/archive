@@ -100,6 +100,40 @@ async function declaredPublic(file: string): Promise<boolean> {
 	}
 }
 
+/**
+ * Percent-decode a request path segment by segment, or `undefined` when it
+ * cannot be served: a malformed escape, or a segment that decodes to a
+ * separator, a control character or a dot-only name. Those only appear once
+ * decoded, so a check on the raw path would miss them — and a dot-only
+ * segment is refused even when it would stay inside the root, as a static
+ * file server refuses `..` outright.
+ */
+function decodePath(raw: string): string | undefined {
+	const segments: string[] = [];
+	for (const segment of raw.split("/")) {
+		let decoded: string;
+		try {
+			decoded = decodeURIComponent(segment);
+		} catch {
+			return undefined;
+		}
+		if (!isPlainSegment(decoded)) return undefined;
+		if (/^\.{2,}$/.test(decoded)) return undefined;
+		segments.push(decoded);
+	}
+	return segments.join("/");
+}
+
+/** No separator and no control character in one decoded segment. */
+function isPlainSegment(segment: string): boolean {
+	for (let i = 0; i < segment.length; i++) {
+		const code = segment.charCodeAt(i);
+		if (code < 0x20 || code === 0x7f) return false;
+		if (segment[i] === "/" || segment[i] === "\\") return false;
+	}
+	return true;
+}
+
 /** Whether `err` is a filesystem error carrying `code`. */
 function isErrnoCode(err: unknown, code: string): boolean {
 	return (
@@ -156,8 +190,15 @@ export class StaticMiddleware {
 			return next();
 		}
 
-		// Strip prefix and resolve file path
-		const relativePath = reqPath.slice(this.#prefix.length) || "/index.html";
+		// Strip the prefix and percent-decode. The framework hands over the raw
+		// request target, so `my%20logo.png` used to be looked up literally
+		// and every name with a space, `+`, `#` or a non-ASCII letter was
+		// unreachable. Every check below runs on the DECODED path, which is
+		// the one the filesystem sees.
+		const relativePath = decodePath(
+			reqPath.slice(this.#prefix.length) || "/index.html",
+		);
+		if (relativePath === undefined) return next();
 
 		// Visibility sidecars are an implementation detail of LocalDriver
 		// — never serve them, even if the static root happens to overlap

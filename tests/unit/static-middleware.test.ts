@@ -310,3 +310,72 @@ describe("StaticMiddleware", () => {
 		expect(response.sendBuffer).not.toHaveBeenCalled();
 	});
 });
+
+describe("StaticMiddleware > percent-encoded paths", () => {
+	let root: string;
+	let middleware: StaticMiddleware;
+
+	beforeEach(() => {
+		root = fs.mkdtempSync(path.join(os.tmpdir(), "archive-static-enc-"));
+		middleware = new StaticMiddleware({ root, prefix: "/static" });
+	});
+
+	afterEach(() => {
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	const request = async (target: string) => {
+		const { ctx, response } = makeCtx("GET", target);
+		const next = vi.fn<() => Promise<void>>(async () => {});
+		await middleware.handle(ctx, next);
+		const sent = response.sendBuffer.mock.calls[0]?.[0];
+		return { sent: sent?.toString(), next };
+	};
+
+	it("serves a file whose name needs encoding in a URL", async () => {
+		fs.mkdirSync(path.join(root, "dossier été"));
+		fs.writeFileSync(path.join(root, "my logo.png"), "space");
+		fs.writeFileSync(path.join(root, "a+b#c.css"), "reserved");
+		fs.writeFileSync(path.join(root, "dossier été", "x.txt"), "unicode");
+		expect((await request("/static/my%20logo.png")).sent).toBe("space");
+		expect((await request("/static/a%2Bb%23c.css")).sent).toBe("reserved");
+		expect((await request("/static/dossier%20%C3%A9t%C3%A9/x.txt")).sent).toBe(
+			"unicode",
+		);
+	});
+
+	it("refuses what only appears once decoded", async () => {
+		const outside = fs.mkdtempSync(
+			path.join(os.tmpdir(), "archive-static-enc-out-"),
+		);
+		try {
+			fs.writeFileSync(path.join(outside, "secret.txt"), "pwned");
+			fs.mkdirSync(path.join(root, "a"));
+			fs.writeFileSync(path.join(root, "inner.txt"), "inner");
+			fs.writeFileSync(
+				path.join(root, "cat.txt.archive-visibility.json"),
+				JSON.stringify({ visibility: "private" }),
+			);
+			const climb = path
+				.relative(root, path.join(outside, "secret.txt"))
+				.split(path.sep)
+				.map((segment) => (segment === ".." ? "%2e%2e" : segment))
+				.join("/");
+			for (const target of [
+				`/static/${climb}`,
+				"/static/a/%2E%2E/inner.txt",
+				"/static/a%2f..%2finner.txt",
+				"/static/a%5c..%5cinner.txt",
+				"/static/inner.txt%00.png",
+				"/static/%E0%A4%A.txt",
+				"/static/cat.txt.archive-visibility%2Ejson",
+			]) {
+				const { sent, next } = await request(target);
+				expect(sent, target).toBeUndefined();
+				expect(next, target).toHaveBeenCalledTimes(1);
+			}
+		} finally {
+			fs.rmSync(outside, { recursive: true, force: true });
+		}
+	});
+});
