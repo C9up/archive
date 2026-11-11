@@ -17,6 +17,11 @@ import {
 	parseExpiry,
 } from "./expiry.js";
 import { normalizeKey, normalizePrefix } from "./keys.js";
+import {
+	overrideQuery,
+	requestedOverrides,
+	signedPayload,
+} from "./local-signature.js";
 import { inferMimeType } from "./mime-types.js";
 import { DriveDirectory, DriveFile, type FileSnapshot } from "./objects.js";
 
@@ -30,9 +35,17 @@ export interface SignedUrlOptions {
 	 * (5 minutes). Bounds after parsing: 1–604800.
 	 */
 	expiresIn?: number | string;
-	/** Sets the response `Content-Type` served with the signed URL (cloud drivers). */
+	/**
+	 * Sets the response `Content-Type` served with the signed URL. Cloud
+	 * drivers pass it to the provider; the local disk signs it into the URL
+	 * and the signed route sends it.
+	 */
 	contentType?: string;
-	/** Sets the response `Content-Disposition` served with the signed URL (cloud drivers). */
+	/**
+	 * Sets the response `Content-Disposition` served with the signed URL —
+	 * `attachment; filename="…"` to download rather than display. Same
+	 * handling as {@link SignedUrlOptions.contentType}.
+	 */
 	contentDisposition?: string;
 }
 
@@ -769,9 +782,13 @@ export class LocalDriver implements StorageDriver {
 		// Newline-delimited payload: a filePath cannot forge `exp` by
 		// embedding `&exp=...` in its own bytes (URL-decoding still
 		// keeps the literal `\n` separator in the signed material).
-		const message = `${key}\n${exp}`;
+		// Response-header overrides are signed with the rest and carried in the
+		// query, where the signed route reads, verifies and emits them.
+		const overrides = requestedOverrides(options ?? {});
+		const message = signedPayload(key, exp, overrides);
 		const sig = createHmac("sha256", secret).update(message).digest("hex");
-		return `${this.publicUrl(key)}?exp=${exp}&sig=${sig}`;
+		const url = `${this.publicUrl(key)}?exp=${exp}&sig=${sig}`;
+		return overrides.length === 0 ? url : `${url}&${overrideQuery(overrides)}`;
 	}
 
 	/**

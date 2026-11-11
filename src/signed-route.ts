@@ -15,6 +15,12 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import * as path from "node:path";
 import { ArchiveError } from "./errors.js";
 import { normalizeKey } from "./keys.js";
+import {
+	HEADER_OVERRIDES,
+	type HeaderOverride,
+	isHeaderValue,
+	signedPayload,
+} from "./local-signature.js";
 import { inferMimeType } from "./mime-types.js";
 import type { LocalDriver, StorageManager } from "./StorageManager.js";
 
@@ -213,13 +219,32 @@ export function createSignedRouteHandler(
 			return;
 		}
 
+		// Response-header overrides travel in the query and are covered by
+		// the signature. One present in a shape that cannot be verified
+		// (repeated, or carrying a control character) is refused outright.
+		const overrides: HeaderOverride[] = [];
+		for (const [param] of HEADER_OVERRIDES) {
+			const raw = qs[param];
+			if (raw === undefined) continue;
+			if (typeof raw !== "string" || !isHeaderValue(raw)) {
+				ctx.response.status(403).json({
+					error: {
+						code: "E_INVALID_SIGNATURE",
+						message: "Malformed header override",
+					},
+				});
+				return;
+			}
+			if (raw !== "") overrides.push([param, raw]);
+		}
+
 		// Constant-time HMAC verification on the decoded path. The regex
 		// check above already guarantees 32 bytes, so `timingSafeEqual`
 		// cannot throw on a length mismatch here. Run BEFORE the expiry
 		// check so the response time cannot leak whether a sig was valid
 		// for an expired URL versus invalid for a fresh one.
 		const expected = createHmac("sha256", secret)
-			.update(`${filePath}\n${exp}`)
+			.update(signedPayload(filePath, exp, overrides))
 			.digest();
 		const provided = Buffer.from(sigHex, "hex");
 		if (!timingSafeEqual(provided, expected)) {
@@ -237,12 +262,13 @@ export function createSignedRouteHandler(
 		}
 
 		// Signature verified — serve the file.
-		return serve(ctx, filePath);
+		return serve(ctx, filePath, overrides);
 	};
 
 	async function serve(
 		ctx: SignedRouteHttpContext,
 		filePath: string,
+		overrides: readonly HeaderOverride[] = [],
 	): Promise<void> {
 		const content = await storage.get(filePath);
 		if (content === null) {
@@ -253,6 +279,11 @@ export function createSignedRouteHandler(
 		}
 		const ext = path.extname(filePath).toLowerCase();
 		ctx.response.header("Content-Type", inferMimeType(ext));
+		// Signed overrides win over what the extension implies.
+		for (const [param, value] of overrides) {
+			const header = HEADER_OVERRIDES.find(([name]) => name === param)?.[1];
+			if (header !== undefined) ctx.response.header(header, value);
+		}
 		ctx.response.header("Content-Length", String(content.length));
 		if (ctx.request.method() === "HEAD") {
 			ctx.response.status(200);

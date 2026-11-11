@@ -351,3 +351,83 @@ describe("createSignedRouteHandler", () => {
 		).toThrow(/signingSecret/);
 	});
 });
+
+describe("createSignedRouteHandler > response header overrides", () => {
+	let root: string;
+	let driver: LocalDriver;
+	let middleware: ReturnType<typeof createSignedRouteHandler>;
+
+	beforeEach(() => {
+		root = fs.mkdtempSync(path.join(os.tmpdir(), "archive-signed-headers-"));
+		driver = new LocalDriver(root, { signingSecret: "s3cr3t-s3cr3t-s3cr3t" });
+		middleware = createSignedRouteHandler({
+			storage: new StorageManager(driver),
+			driver,
+		});
+	});
+
+	afterEach(() => {
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	const disposition = 'attachment; filename="x.pdf"';
+
+	it("signs the overrides and serves them", async () => {
+		await driver.put("report.pdf", "%PDF");
+		const url = driver.getSignedUrl("report.pdf", {
+			contentType: "application/x-report",
+			contentDisposition: disposition,
+		});
+		const { ctx, response } = buildCtx("GET", url);
+		await middleware(
+			ctx,
+			vi.fn(async () => {}),
+		);
+		expect(response.status).toHaveBeenCalledWith(200);
+		expect(response.header).toHaveBeenCalledWith(
+			"Content-Type",
+			"application/x-report",
+		);
+		expect(response.header).toHaveBeenCalledWith(
+			"Content-Disposition",
+			disposition,
+		);
+	});
+
+	it("refuses an override the signature does not cover", async () => {
+		await driver.put("report.pdf", "%PDF");
+		const plain = driver.getSignedUrl("report.pdf");
+		const signed = driver.getSignedUrl("report.pdf", {
+			contentDisposition: disposition,
+		});
+		for (const forged of [
+			// Added to a URL signed without it.
+			`${plain}&contentDisposition=${encodeURIComponent("inline")}`,
+			// Changed after signing.
+			signed.replace(
+				/contentDisposition=[^&]*/,
+				`contentDisposition=${encodeURIComponent("inline")}`,
+			),
+			// Dropped after signing.
+			signed.replace(/&contentDisposition=[^&]*/, ""),
+		]) {
+			const { ctx, response } = buildCtx("GET", forged);
+			await middleware(
+				ctx,
+				vi.fn(async () => {}),
+			);
+			expect(response.status, forged).toHaveBeenCalledWith(403);
+			expect(response.sendBuffer, forged).not.toHaveBeenCalled();
+		}
+	});
+
+	it("refuses to sign a header value that could split the response", () => {
+		expect(() =>
+			driver.getSignedUrl("report.pdf", {
+				contentDisposition: "inline\r\nSet-Cookie: a=b",
+			}),
+		).toThrow(
+			expect.objectContaining({ code: "E_ARCHIVE_INVALID_HEADER_VALUE" }),
+		);
+	});
+});
