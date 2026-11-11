@@ -341,3 +341,49 @@ describe("archive > LocalDriver > security guards", () => {
 		expect(await storage.url("secret.pdf")).toMatch(/\?exp=\d+&sig=/);
 	});
 });
+
+describe("archive > LocalDriver > listing reads only the prefixed subtree", () => {
+	it("never opens a directory outside the prefix", async () => {
+		await driver.put("avatars/42/a.png", "a");
+		await driver.put("avatars/42/b.png", "b");
+		await driver.put("avatars/43/c.png", "c");
+		await driver.put("avatars/4.png", "d");
+		await driver.put("other/x.txt", "x");
+		// A directory the walk cannot open: reading the whole root to filter
+		// afterwards fails on it, a walk that starts at the prefix never
+		// reaches it.
+		const locked = path.join(root, "locked");
+		await fsp.mkdir(locked);
+		await fsp.writeFile(path.join(locked, "secret.txt"), "s");
+		await fsp.chmod(locked, 0o000);
+		try {
+			const paths = async (prefix: string) => {
+				const seen: string[] = [];
+				for await (const entry of driver.list(prefix)) seen.push(entry.path);
+				return seen.sort();
+			};
+			expect(await paths("avatars/42/")).toEqual([
+				"avatars/42/a.png",
+				"avatars/42/b.png",
+			]);
+			// A prefix that ends mid-name still matches by prefix.
+			expect(await paths("avatars/4")).toEqual([
+				"avatars/4.png",
+				"avatars/42/a.png",
+				"avatars/42/b.png",
+				"avatars/43/c.png",
+			]);
+			expect(await paths("missing/")).toEqual([]);
+			expect(await paths("avatars/4.png/")).toEqual([]);
+			const { objects } = await storage.listAll("avatars/42");
+			expect([...objects].map((o) => (o.isFile ? o.key : o.prefix))).toEqual([
+				"avatars/42/a.png",
+				"avatars/42/b.png",
+			]);
+			await storage.deleteAll("avatars/43/");
+			expect(await paths("avatars/43/")).toEqual([]);
+		} finally {
+			await fsp.chmod(locked, 0o700);
+		}
+	});
+});

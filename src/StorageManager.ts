@@ -10,6 +10,7 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import * as url from "node:url";
+import { errnoCode } from "./errno.js";
 import { ArchiveError } from "./errors.js";
 import {
 	assertValidExpiry,
@@ -960,6 +961,9 @@ export class LocalDriver implements StorageDriver {
 				}
 			}
 		}
+		// Sorted by key, as upstream lists: the walk's order is the
+		// filesystem's, which differs between machines.
+		files.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 		return { objects: [...directories.values(), ...files] };
 	}
 
@@ -979,30 +983,31 @@ export class LocalDriver implements StorageDriver {
 
 	async *list(given: string): AsyncIterable<StorageEntry> {
 		const prefix = normalizePrefix(given);
-		// `recursive: true` gives us every descendant in one call;
-		// `withFileTypes: true` lets us skip directories and inspect each
-		// entry without a follow-up stat for type.
-		let entries: fs.Dirent[];
+		// Start the walk at the deepest directory the prefix names, not at the
+		// root: `avatars/42/` reads `avatars/42`, `avatars/4` reads
+		// `avatars`. Walking the whole root and filtering afterwards cost the
+		// size of the entire disk for every listing, however narrow.
+		const slash = prefix.lastIndexOf("/");
+		const dir = slash === -1 ? "" : prefix.slice(0, slash);
+		const start = dir === "" ? this.#root : await this.#safePath(dir);
+		let walk: fs.Dir;
 		try {
-			entries = await fsp.readdir(this.#root, {
-				recursive: true,
-				withFileTypes: true,
-			});
+			// Read lazily: entries arrive as the walk reaches them instead of
+			// the whole subtree being held in memory first. Links are listed,
+			// not followed, so the walk stays inside the root.
+			walk = await fsp.opendir(start, { recursive: true });
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+			const code = errnoCode(err);
+			// Nothing stored under that prefix, or it names a file.
+			if (code === "ENOENT" || code === "ENOTDIR") return;
 			throw err;
 		}
-		for (const entry of entries) {
+		for await (const entry of walk) {
 			if (!entry.isFile()) continue;
-			// `parentPath` is typed on Dirent since Node 20.12, which the engine
-			// range already requires — the double cast that used to read it
-			// (and its `path` fallback for older shapes) is no longer buying
-			// anything.
-			const parent = entry.parentPath ?? this.#root;
-			const full = path.join(parent, entry.name);
+			const full = path.join(entry.parentPath, entry.name);
 			const rel = path.relative(this.#root, full).split(path.sep).join("/");
 			// Exclude sidecars — implementation detail.
-			if (rel.endsWith(VISIBILITY_SIDECAR_SUFFIX)) continue;
+			if (rel.toLowerCase().endsWith(VISIBILITY_SIDECAR_SUFFIX)) continue;
 			if (!rel.startsWith(prefix)) continue;
 			const stat = await fsp.stat(full);
 			yield { path: rel, size: stat.size, lastModified: stat.mtime };
