@@ -607,7 +607,7 @@ export class S3Driver implements StorageDriver {
 				/<Contents>[\s\S]*?<Key>([^<]+)<\/Key>[\s\S]*?<\/Contents>/g;
 			let m: RegExpExecArray | null = keyRe.exec(xml);
 			while (m !== null) {
-				if (m[1] !== undefined) keys.push(m[1]);
+				if (m[1] !== undefined) keys.push(xmlUnescape(m[1]));
 				m = keyRe.exec(xml);
 			}
 			if (keys.length > 0) await this.#deleteObjects(keys);
@@ -615,7 +615,10 @@ export class S3Driver implements StorageDriver {
 			const tokenMatch = xml.match(
 				/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/,
 			);
-			continuationToken = truncated && tokenMatch ? tokenMatch[1] : undefined;
+			continuationToken =
+				truncated && tokenMatch?.[1] !== undefined
+					? xmlUnescape(tokenMatch[1])
+					: undefined;
 		} while (continuationToken);
 	}
 
@@ -690,7 +693,7 @@ export class S3Driver implements StorageDriver {
 		let pm: RegExpExecArray | null = prefixRe.exec(xml);
 		while (pm !== null) {
 			if (pm[1] !== undefined) {
-				objects.push(new DriveDirectory(pm[1].replace(/\/$/, "")));
+				objects.push(new DriveDirectory(xmlUnescape(pm[1]).replace(/\/$/, "")));
 			}
 			pm = prefixRe.exec(xml);
 		}
@@ -698,7 +701,7 @@ export class S3Driver implements StorageDriver {
 		let bm: RegExpExecArray | null = blockRe.exec(xml);
 		while (bm !== null) {
 			const block = bm[1] ?? "";
-			const key = block.match(/<Key>([^<]+)<\/Key>/)?.[1] ?? "";
+			const key = xmlUnescape(block.match(/<Key>([^<]+)<\/Key>/)?.[1] ?? "");
 			const sizeRaw = block.match(/<Size>([^<]+)<\/Size>/)?.[1] ?? "0";
 			const lm = block.match(/<LastModified>([^<]+)<\/LastModified>/)?.[1];
 			const size = Number.parseInt(sizeRaw, 10);
@@ -709,8 +712,9 @@ export class S3Driver implements StorageDriver {
 					mimeType: "application/octet-stream",
 					contentType: "application/octet-stream",
 					lastModified: lm ? new Date(lm) : new Date(0),
-					etag:
-						block.match(/<ETag>([^<]+)<\/ETag>/)?.[1]?.replace(/"/g, "") ?? "",
+					etag: xmlUnescape(
+						block.match(/<ETag>([^<]+)<\/ETag>/)?.[1] ?? "",
+					).replace(/"/g, ""),
 					visibility: "private",
 				}),
 			);
@@ -721,7 +725,10 @@ export class S3Driver implements StorageDriver {
 			/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/,
 		);
 		return {
-			paginationToken: truncated && tokenMatch ? tokenMatch[1] : undefined,
+			paginationToken:
+				truncated && tokenMatch?.[1] !== undefined
+					? xmlUnescape(tokenMatch[1])
+					: undefined,
 			objects,
 		};
 	}
@@ -759,7 +766,7 @@ export class S3Driver implements StorageDriver {
 			let blockMatch: RegExpExecArray | null = blockRe.exec(xml);
 			while (blockMatch !== null) {
 				const block = blockMatch[1] ?? "";
-				const key = block.match(/<Key>([^<]+)<\/Key>/)?.[1] ?? "";
+				const key = xmlUnescape(block.match(/<Key>([^<]+)<\/Key>/)?.[1] ?? "");
 				const sizeRaw = block.match(/<Size>([^<]+)<\/Size>/)?.[1] ?? "0";
 				const lm = block.match(/<LastModified>([^<]+)<\/LastModified>/)?.[1];
 				yield {
@@ -773,7 +780,10 @@ export class S3Driver implements StorageDriver {
 			const tokenMatch = xml.match(
 				/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/,
 			);
-			continuationToken = truncated && tokenMatch ? tokenMatch[1] : undefined;
+			continuationToken =
+				truncated && tokenMatch?.[1] !== undefined
+					? xmlUnescape(tokenMatch[1])
+					: undefined;
 		} while (continuationToken);
 	}
 
@@ -894,7 +904,7 @@ export class S3Driver implements StorageDriver {
 				`S3 multipart initiate: UploadId missing from response: ${xml}`,
 			);
 		}
-		return match[1];
+		return xmlUnescape(match[1]);
 	}
 
 	/** Upload a single part. Returns the server-reported ETag (quotes kept). */
@@ -1034,6 +1044,31 @@ function unsignedMetadataHeaders(
 		headers["content-disposition"] = options.contentDisposition;
 	}
 	return headers;
+}
+
+/**
+ * Decode the text of an XML element as S3 sends it: the five predefined
+ * entities and numeric character references. Every text node read from a
+ * response goes through here — a listed key `a&amp;b` names the object
+ * `a&b`, and taking it verbatim misreported the key and made `deleteAll`
+ * send `a&amp;amp;b`, leaving the real object behind without an error.
+ */
+function xmlUnescape(text: string): string {
+	return text.replace(
+		/&(amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-f]+);/gi,
+		(entity, name: string) => {
+			const lower = name.toLowerCase();
+			if (lower === "amp") return "&";
+			if (lower === "lt") return "<";
+			if (lower === "gt") return ">";
+			if (lower === "quot") return '"';
+			if (lower === "apos") return "'";
+			const code = lower.startsWith("#x")
+				? Number.parseInt(lower.slice(2), 16)
+				: Number.parseInt(lower.slice(1), 10);
+			return code <= 0x10ffff ? String.fromCodePoint(code) : entity;
+		},
+	);
 }
 
 /** Minimal XML text escaping for object keys inside a DeleteObjects body. */

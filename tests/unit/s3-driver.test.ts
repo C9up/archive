@@ -697,6 +697,54 @@ describe("S3Driver > deleting a whole prefix", () => {
 		expect(String(init.body)).toContain("a&amp;b.txt");
 	});
 
+	it("reads the keys S3 lists XML-escaped as the objects they name", async () => {
+		// What S3 actually sends for `a&b.txt`, `x<y>.txt` and `été.txt`.
+		const listed = [
+			"cat/a&amp;b.txt",
+			"cat/x&lt;y&gt;.txt",
+			"cat/&#233;t&#xE9;.txt",
+		];
+		const real = ["cat/a&b.txt", "cat/x<y>.txt", "cat/été.txt"];
+
+		fetchSpy.mockResolvedValueOnce(page(listed));
+		const seen: string[] = [];
+		for await (const entry of driver.list("cat/")) seen.push(entry.path);
+		expect(seen).toEqual(real);
+
+		fetchSpy.mockResolvedValueOnce(page(listed, "next&amp;token"));
+		const { objects, paginationToken } = await driver.listAll("cat/", {
+			recursive: true,
+		});
+		expect([...objects].map((o) => (o.isFile ? o.key : o.prefix))).toEqual(
+			real,
+		);
+		expect(paginationToken).toBe("next&token");
+
+		fetchSpy.mockResolvedValueOnce(page(listed));
+		fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+		await driver.deleteAll("cat/");
+		const body = String(fetchSpy.mock.calls.at(-1)?.[1]?.body);
+		// Escaped once, as the objects' real names — not escaped a second time.
+		expect(body).toContain("<Key>cat/a&amp;b.txt</Key>");
+		expect(body).toContain("<Key>cat/x&lt;y&gt;.txt</Key>");
+		expect(body).toContain("<Key>cat/été.txt</Key>");
+		expect(body).not.toContain("&amp;amp;");
+	});
+
+	it("reads an escaped directory prefix and continuation token", async () => {
+		fetchSpy.mockResolvedValueOnce(
+			new Response(
+				"<ListBucketResult><CommonPrefixes><Prefix>cat/R&amp;D/</Prefix></CommonPrefixes><IsTruncated>true</IsTruncated><NextContinuationToken>a&amp;b</NextContinuationToken></ListBucketResult>",
+				{ status: 200 },
+			),
+		);
+		const { objects, paginationToken } = await driver.listAll("cat/");
+		expect([...objects].map((o) => (o.isFile ? o.key : o.prefix))).toEqual([
+			"cat/R&D",
+		]);
+		expect(paginationToken).toBe("a&b");
+	});
+
 	it("keeps going until the prefix is drained", async () => {
 		fetchSpy.mockResolvedValueOnce(page(["cat/a.txt"], "page2"));
 		fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
