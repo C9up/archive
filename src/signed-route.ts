@@ -12,8 +12,8 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import * as path from "node:path";
 import { ArchiveError } from "./errors.js";
+import { matchesIfNoneMatch } from "./etag.js";
 import { normalizeKey } from "./keys.js";
 import {
 	HEADER_OVERRIDES,
@@ -21,8 +21,11 @@ import {
 	isHeaderValue,
 	signedPayload,
 } from "./local-signature.js";
-import { inferMimeType } from "./mime-types.js";
-import type { LocalDriver, StorageManager } from "./StorageManager.js";
+import type {
+	LocalDriver,
+	Metadata,
+	StorageManager,
+} from "./StorageManager.js";
 
 /**
  * Minimal request/response contract the signed-route handler needs.
@@ -34,7 +37,11 @@ import type { LocalDriver, StorageManager } from "./StorageManager.js";
 export interface SignedRouteResponse {
 	status(code: number): SignedRouteResponse;
 	header(name: string, value: string): SignedRouteResponse;
-	sendBuffer(buf: Buffer): void;
+	/**
+	 * Send a readable as the body. The framework's response streams it to
+	 * the client; the file is never held in memory whole.
+	 */
+	stream(body: NodeJS.ReadableStream): Promise<void> | void;
 	json(data: unknown): void;
 }
 
@@ -270,26 +277,45 @@ export function createSignedRouteHandler(
 		filePath: string,
 		overrides: readonly HeaderOverride[] = [],
 	): Promise<void> {
-		const content = await storage.get(filePath);
-		if (content === null) {
-			ctx.response
-				.status(404)
-				.json({ error: { code: "E_NOT_FOUND", message: "File not found" } });
-			return;
+		// Metadata first, the bytes only once they are known to be wanted: the
+		// whole file used to be read into memory for every request, and a
+		// client revalidating its copy got a full transfer each time.
+		let metadata: Metadata;
+		try {
+			metadata = await storage.getMetadata(filePath);
+		} catch (err) {
+			if (isNotFound(err)) return notFound(ctx);
+			throw err;
 		}
-		const ext = path.extname(filePath).toLowerCase();
-		ctx.response.header("Content-Type", inferMimeType(ext));
+		ctx.response.header("ETag", metadata.etag);
+		ctx.response.header("Last-Modified", metadata.lastModified.toUTCString());
+		ctx.response.header("Content-Type", metadata.contentType);
 		// Signed overrides win over what the extension implies.
 		for (const [param, value] of overrides) {
 			const header = HEADER_OVERRIDES.find(([name]) => name === param)?.[1];
 			if (header !== undefined) ctx.response.header(header, value);
 		}
-		ctx.response.header("Content-Length", String(content.length));
+		if (
+			matchesIfNoneMatch(ctx.request.header("if-none-match"), metadata.etag)
+		) {
+			ctx.response.status(304);
+			return;
+		}
+		ctx.response.header("Content-Length", String(metadata.contentLength));
 		if (ctx.request.method() === "HEAD") {
 			ctx.response.status(200);
 			return;
 		}
-		ctx.response.status(200).sendBuffer(content);
+		let body: NodeJS.ReadableStream;
+		try {
+			body = await storage.getStream(filePath);
+		} catch (err) {
+			// Deleted between the metadata read and the open.
+			if (isNotFound(err)) return notFound(ctx);
+			throw err;
+		}
+		ctx.response.status(200);
+		await ctx.response.stream(body);
 	}
 }
 
@@ -299,6 +325,16 @@ const KEY_ERRORS = new Set([
 	"E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
 	"E_ARCHIVE_UNALLOWED_CHARACTERS",
 ]);
+
+function isNotFound(err: unknown): boolean {
+	return err instanceof ArchiveError && err.code === "E_ARCHIVE_NOT_FOUND";
+}
+
+function notFound(ctx: SignedRouteHttpContext): void {
+	ctx.response
+		.status(404)
+		.json({ error: { code: "E_NOT_FOUND", message: "File not found" } });
+}
 
 function isKeyError(err: unknown): boolean {
 	return err instanceof ArchiveError && KEY_ERRORS.has(err.code);

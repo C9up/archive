@@ -10,6 +10,7 @@ import {
 	StorageManager,
 	services,
 } from "../../src/index.js";
+import type { StaticMiddlewareResponse } from "../../src/StaticMiddleware.js";
 import type {
 	SignedRouteHttpContext,
 	SignedRouteResponse,
@@ -19,19 +20,32 @@ import type {
  * Minimal HttpContext stand-in. Matches the subset of the Ream
  * Request/Response surface that the signed-route handler calls.
  */
-function buildCtx(method: string, fullPath: string) {
+function buildCtx(
+	method: string,
+	fullPath: string,
+	reqHeaders: Record<string, string> = {},
+) {
 	const [reqPath, qs = ""] = fullPath.split("?");
 	const qsObject: Record<string, unknown> = {};
 	for (const [k, v] of new URLSearchParams(qs)) qsObject[k] = v;
 	const statusSpy = vi.fn<(code: number) => SignedRouteResponse>();
 	const headerSpy =
 		vi.fn<(name: string, value: string) => SignedRouteResponse>();
-	const sendBufferSpy = vi.fn<(buf: Buffer) => void>();
+	// Drains what it is handed, as the framework's response does, so a test
+	// can read the body that went out.
+	const chunks: Buffer[] = [];
+	const streamSpy = vi.fn<(body: NodeJS.ReadableStream) => Promise<void>>(
+		async (body) => {
+			for await (const chunk of body) {
+				chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+			}
+		},
+	);
 	const jsonSpy = vi.fn<(data: unknown) => void>();
 	const response: SignedRouteHttpContext["response"] = {
 		status: statusSpy,
 		header: headerSpy,
-		sendBuffer: sendBufferSpy,
+		stream: streamSpy,
 		json: jsonSpy,
 	};
 	statusSpy.mockReturnValue(response);
@@ -40,15 +54,16 @@ function buildCtx(method: string, fullPath: string) {
 		method: () => method,
 		path: () => reqPath ?? "",
 		qs: () => qsObject,
-		header: () => undefined,
+		header: (name: string) => reqHeaders[name.toLowerCase()],
 	};
 	const ctx: SignedRouteHttpContext = { request, response };
 	return {
 		ctx,
+		body: () => Buffer.concat(chunks).toString(),
 		response: {
 			status: statusSpy,
 			header: headerSpy,
-			sendBuffer: sendBufferSpy,
+			stream: streamSpy,
 			json: jsonSpy,
 		},
 	};
@@ -83,7 +98,7 @@ describe("createSignedRouteHandler", () => {
 		await middleware(ctx, next);
 		expect(next).not.toHaveBeenCalled();
 		expect(response.status).toHaveBeenCalledWith(200);
-		expect(response.sendBuffer).toHaveBeenCalledTimes(1);
+		expect(response.stream).toHaveBeenCalledTimes(1);
 		expect(response.header).toHaveBeenCalledWith("Content-Type", "text/plain");
 	});
 
@@ -184,7 +199,7 @@ describe("createSignedRouteHandler", () => {
 		expect(response.json).toHaveBeenCalledWith({
 			error: { code: "E_ARCHIVE_ACCESS_DENIED", message: "Access denied" },
 		});
-		expect(response.sendBuffer).not.toHaveBeenCalled();
+		expect(response.stream).not.toHaveBeenCalled();
 	});
 
 	it("refuses a request carrying half a signature for a private file", async () => {
@@ -196,7 +211,7 @@ describe("createSignedRouteHandler", () => {
 			await middleware(ctx, next);
 			expect(next).not.toHaveBeenCalled();
 			expect(response.status).toHaveBeenCalledWith(403);
-			expect(response.sendBuffer).not.toHaveBeenCalled();
+			expect(response.stream).not.toHaveBeenCalled();
 		}
 	});
 
@@ -213,18 +228,18 @@ describe("createSignedRouteHandler", () => {
 			await middleware(ctx, next);
 			expect(next, target).not.toHaveBeenCalled();
 			expect(response.status, target).toHaveBeenCalledWith(403);
-			expect(response.sendBuffer, target).not.toHaveBeenCalled();
+			expect(response.stream, target).not.toHaveBeenCalled();
 		}
 	});
 
 	it("serves an unsigned request for a public file itself", async () => {
 		await storage.put("cat.txt", "hello");
-		const { ctx, response } = buildCtx("GET", "/storage/cat.txt");
+		const { ctx, response, body } = buildCtx("GET", "/storage/cat.txt");
 		const next = vi.fn(async () => {});
 		await middleware(ctx, next);
 		expect(next).not.toHaveBeenCalled();
 		expect(response.status).toHaveBeenCalledWith(200);
-		expect(response.sendBuffer).toHaveBeenCalledWith(Buffer.from("hello"));
+		expect(body()).toBe("hello");
 	});
 
 	it("does not let a static server mounted behind it serve a private file", async () => {
@@ -235,8 +250,20 @@ describe("createSignedRouteHandler", () => {
 			extensions: [".pdf"],
 		});
 		const { ctx, response } = buildCtx("GET", "/storage/secret.pdf");
-		await middleware(ctx, () => statics.handle(ctx, async () => {}));
-		expect(response.sendBuffer).not.toHaveBeenCalled();
+		const staticSend = vi.fn<(buf: Buffer) => void>();
+		const staticResponse: StaticMiddlewareResponse = {
+			status: () => staticResponse,
+			header: () => staticResponse,
+			sendBuffer: staticSend,
+		};
+		await middleware(ctx, () =>
+			statics.handle(
+				{ request: ctx.request, response: staticResponse },
+				async () => {},
+			),
+		);
+		expect(response.stream).not.toHaveBeenCalled();
+		expect(staticSend).not.toHaveBeenCalled();
 		expect(response.status).toHaveBeenCalledWith(403);
 	});
 
@@ -417,7 +444,7 @@ describe("createSignedRouteHandler > response header overrides", () => {
 				vi.fn(async () => {}),
 			);
 			expect(response.status, forged).toHaveBeenCalledWith(403);
-			expect(response.sendBuffer, forged).not.toHaveBeenCalled();
+			expect(response.stream, forged).not.toHaveBeenCalled();
 		}
 	});
 
@@ -429,5 +456,81 @@ describe("createSignedRouteHandler > response header overrides", () => {
 		).toThrow(
 			expect.objectContaining({ code: "E_ARCHIVE_INVALID_HEADER_VALUE" }),
 		);
+	});
+});
+
+describe("createSignedRouteHandler > streaming and revalidation", () => {
+	let root: string;
+	let driver: LocalDriver;
+	let storage: StorageManager;
+	let middleware: ReturnType<typeof createSignedRouteHandler>;
+
+	beforeEach(() => {
+		root = fs.mkdtempSync(path.join(os.tmpdir(), "archive-signed-stream-"));
+		driver = new LocalDriver(root, { signingSecret: "s3cr3t-s3cr3t-s3cr3t" });
+		storage = new StorageManager(driver);
+		middleware = createSignedRouteHandler({ storage, driver });
+	});
+
+	afterEach(() => {
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	it("streams the file instead of reading it into memory", async () => {
+		await storage.put("big.bin", Buffer.alloc(256 * 1024, 7), {
+			visibility: "private",
+		});
+		const getSpy = vi.spyOn(storage, "get");
+		const { ctx, response, body } = buildCtx(
+			"GET",
+			driver.getSignedUrl("big.bin"),
+		);
+		await middleware(
+			ctx,
+			vi.fn(async () => {}),
+		);
+		expect(getSpy).not.toHaveBeenCalled();
+		expect(response.stream).toHaveBeenCalledTimes(1);
+		expect(body().length).toBe(256 * 1024);
+		expect(response.header).toHaveBeenCalledWith(
+			"Content-Length",
+			String(256 * 1024),
+		);
+	});
+
+	it("sends a validator and answers 304 to a client that already has the file", async () => {
+		await storage.put("cat.txt", "hello", { visibility: "private" });
+		const url = driver.getSignedUrl("cat.txt");
+		const first = buildCtx("GET", url);
+		await middleware(
+			first.ctx,
+			vi.fn(async () => {}),
+		);
+		const etag = first.response.header.mock.calls.find(
+			([name]) => name === "ETag",
+		)?.[1];
+		expect(etag).toBe((await storage.getMetadata("cat.txt")).etag);
+		expect(
+			first.response.header.mock.calls.some(([n]) => n === "Last-Modified"),
+		).toBe(true);
+
+		for (const method of ["GET", "HEAD"]) {
+			const again = buildCtx(method, url, { "if-none-match": etag ?? "" });
+			await middleware(
+				again.ctx,
+				vi.fn(async () => {}),
+			);
+			expect(again.response.status, method).toHaveBeenCalledWith(304);
+			expect(again.response.stream, method).not.toHaveBeenCalled();
+		}
+
+		// A stale validator gets the file.
+		const stale = buildCtx("GET", url, { "if-none-match": 'W/"stale"' });
+		await middleware(
+			stale.ctx,
+			vi.fn(async () => {}),
+		);
+		expect(stale.response.status).toHaveBeenCalledWith(200);
+		expect(stale.body()).toBe("hello");
 	});
 });
