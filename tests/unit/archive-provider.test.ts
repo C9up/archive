@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArchiveAppContext } from "../../src/ArchiveProvider.js";
 import ArchiveProvider from "../../src/ArchiveProvider.js";
 import { services } from "../../src/DriveManager.js";
-import { LocalDriver, S3Driver, StorageManager } from "../../src/index.js";
+import { StorageManager } from "../../src/index.js";
 
 /**
  * Every storage root these tests create lives in a temp directory, removed
@@ -177,16 +177,17 @@ describe("ArchiveProvider", () => {
 	});
 
 	it("builds a LocalDriver-backed manager when driver is 'local'", async () => {
+		const root = tempRoot();
 		const app = buildApp({
-			archive: { driver: "local", local: { root: tempRoot() } },
+			archive: { driver: "local", local: { root } },
 		});
 		new ArchiveProvider(app).register();
 
 		const manager = await app.container.resolve<StorageManager>(StorageManager);
 		expect(manager.publicUrl("file.png")).toBe("/storage/file.png");
-		// Sanity: both driver classes are reachable from the barrel.
-		expect(LocalDriver).toBeDefined();
-		expect(S3Driver).toBeDefined();
+		// The configured root is the one written to.
+		await manager.put("file.png", "x");
+		expect(fs.readFileSync(path.join(root, "file.png"), "utf8")).toBe("x");
 	});
 
 	it("boot() eagerly throws E_ARCHIVE_INVALID_DRIVER on a misspelled driver name", async () => {
