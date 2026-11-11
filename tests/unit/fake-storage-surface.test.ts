@@ -6,13 +6,40 @@
  * checked — and a `listAll` that reports the wrong shape sends them chasing a
  * bug in their own code.
  */
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Readable } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DriveManager, services } from "../../src/DriveManager.js";
 import {
 	FakeStorage,
 	FakeStorageManager,
 } from "../../src/testing/FakeStorage.js";
+
+/**
+ * Disks built here get temp roots, removed after each test; the working
+ * directory is a fresh temp directory too, so the `./storage` default of a
+ * bare `services.fs()` never lands in the repository.
+ */
+const roots: string[] = [];
+
+function tempRoot(): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "archive-fake-surface-"));
+	roots.push(dir);
+	return dir;
+}
+
+beforeEach(() => {
+	vi.spyOn(process, "cwd").mockReturnValue(tempRoot());
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
+	for (const dir of roots.splice(0)) {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
 
 const filled = async () => {
 	const fake = new FakeStorage();
@@ -186,8 +213,8 @@ describe("archive > choosing a disk", () => {
 	const config = () => ({
 		default: "local" as const,
 		services: {
-			local: services.fs({ location: "./storage" }),
-			backup: services.fs({ location: "./backup" }),
+			local: services.fs({ location: tempRoot() }),
+			backup: services.fs({ location: tempRoot() }),
 		},
 	});
 
@@ -299,8 +326,10 @@ describe("archive > the config helpers", () => {
 	});
 
 	it("takes `root` as an alias of `location`", async () => {
-		const { LocalDriver } = await import("../../src/index.js");
+		const root = tempRoot();
+		const driver = services.fs({ root })();
+		await driver.put("a.txt", "x");
 
-		expect(services.fs({ root: "./elsewhere" })()).toBeInstanceOf(LocalDriver);
+		expect(fs.readFileSync(path.join(root, "a.txt"), "utf8")).toBe("x");
 	});
 });

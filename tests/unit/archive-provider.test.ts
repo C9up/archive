@@ -1,10 +1,39 @@
 import { createHmac } from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Secret } from "@c9up/ream";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArchiveAppContext } from "../../src/ArchiveProvider.js";
 import ArchiveProvider from "../../src/ArchiveProvider.js";
 import { services } from "../../src/DriveManager.js";
 import { LocalDriver, S3Driver, StorageManager } from "../../src/index.js";
+
+/**
+ * Every storage root these tests create lives in a temp directory, removed
+ * after each test. That includes the provider's built-in default
+ * (`./storage`, resolved against the working directory): the working
+ * directory is pointed at a fresh temp directory for each test, so an
+ * unconfigured app's lazy default lands there and not in the repository.
+ */
+const roots: string[] = [];
+
+function tempRoot(): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "archive-provider-"));
+	roots.push(dir);
+	return dir;
+}
+
+beforeEach(() => {
+	vi.spyOn(process, "cwd").mockReturnValue(tempRoot());
+});
+
+afterEach(() => {
+	vi.restoreAllMocks();
+	for (const dir of roots.splice(0)) {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
 
 /**
  * Minimal container implementing the surface ArchiveProvider.register drives
@@ -49,7 +78,7 @@ function buildApp(initial: Record<string, unknown> = {}): ArchiveAppContext {
 describe("ArchiveProvider", () => {
 	it("binds StorageManager under both class and 'storage' string token", async () => {
 		const app = buildApp({
-			archive: { driver: "local", local: { root: "./tmp-storage" } },
+			archive: { driver: "local", local: { root: tempRoot() } },
 		});
 		new ArchiveProvider(app).register();
 
@@ -65,7 +94,7 @@ describe("ArchiveProvider", () => {
 		const app = buildApp({
 			archive: {
 				driver: "local",
-				local: { root: "./tmp-storage-signed", signingSecret: "a".repeat(32) },
+				local: { root: tempRoot(), signingSecret: "a".repeat(32) },
 			},
 		});
 		new ArchiveProvider(app).register();
@@ -82,7 +111,7 @@ describe("ArchiveProvider", () => {
 			archive: {
 				driver: "local",
 				local: {
-					root: "./tmp-storage-signed",
+					root: tempRoot(),
 					signingSecret: new Secret("a".repeat(32)),
 				},
 			},
@@ -149,7 +178,7 @@ describe("ArchiveProvider", () => {
 
 	it("builds a LocalDriver-backed manager when driver is 'local'", async () => {
 		const app = buildApp({
-			archive: { driver: "local", local: { root: "./tmp-archive" } },
+			archive: { driver: "local", local: { root: tempRoot() } },
 		});
 		new ArchiveProvider(app).register();
 
@@ -194,7 +223,7 @@ describe("ArchiveProvider", () => {
 
 	it("boot() eagerly validates an explicit local config", async () => {
 		const app = buildApp({
-			archive: { driver: "local", local: { root: "./tmp-boot-archive" } },
+			archive: { driver: "local", local: { root: tempRoot() } },
 		});
 		const provider = new ArchiveProvider(app);
 		provider.register();
@@ -208,7 +237,7 @@ describe("ArchiveProvider > the multi-disk bindings", () => {
 		const app = buildApp({
 			archive: {
 				default: "local",
-				services: { local: services.fs({ location: "./tmp-multi" }) },
+				services: { local: services.fs({ location: tempRoot() }) },
 			},
 		});
 		const provider = new ArchiveProvider(app);
@@ -225,7 +254,7 @@ describe("ArchiveProvider > the multi-disk bindings", () => {
 
 	it("resolves the same manager whichever token is asked for", async () => {
 		const app = buildApp({
-			archive: { driver: "local", local: { root: "./tmp-tokens" } },
+			archive: { driver: "local", local: { root: tempRoot() } },
 		});
 		const provider = new ArchiveProvider(app);
 		provider.register();
@@ -275,7 +304,7 @@ describe("ArchiveProvider > the two ways in agree", () => {
 
 	it("leaves an explicit config resolving eagerly, as before", async () => {
 		const app = buildApp({
-			archive: { driver: "local", local: { root: "./tmp-storage-eager" } },
+			archive: { driver: "local", local: { root: tempRoot() } },
 		});
 		const provider = new ArchiveProvider(app);
 		provider.register();
@@ -305,7 +334,7 @@ describe("ArchiveProvider > one manager, however you reach for it", () => {
 		);
 		const { getStorage } = await import("../../src/services/main.js");
 		const app = buildApp({
-			archive: { driver: "local", local: { root: "./tmp-storage-identity" } },
+			archive: { driver: "local", local: { root: tempRoot() } },
 		});
 		const provider = new ProviderFresh(app);
 		provider.register();
@@ -359,7 +388,7 @@ describe("ArchiveProvider > shutdown", () => {
 
 	const configured = () =>
 		buildApp({
-			archive: { driver: "local", local: { root: "./tmp-storage" } },
+			archive: { driver: "local", local: { root: tempRoot() } },
 		});
 
 	it("releases the services/main singleton it bound", async () => {
