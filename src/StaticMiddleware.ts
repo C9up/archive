@@ -64,6 +64,52 @@ export interface StaticConfig {
 	extensions?: string[];
 }
 
+/**
+ * Whether a file may be served unsigned, by its local-disk visibility marker.
+ *
+ * No marker is the local disk's default, public. A marker that says exactly
+ * `public` is public. Anything else — private, unreadable, malformed, or a
+ * value that is neither — is not served: an undetermined visibility must
+ * never be read as public.
+ */
+async function declaredPublic(file: string): Promise<boolean> {
+	let raw: string;
+	try {
+		const handle = await fsp.open(
+			file + VISIBILITY_SIDECAR_SUFFIX,
+			fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0),
+		);
+		try {
+			raw = await handle.readFile("utf8");
+		} finally {
+			await handle.close();
+		}
+	} catch (err) {
+		return isErrnoCode(err, "ENOENT");
+	}
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		return (
+			typeof parsed === "object" &&
+			parsed !== null &&
+			"visibility" in parsed &&
+			parsed.visibility === "public"
+		);
+	} catch {
+		return false;
+	}
+}
+
+/** Whether `err` is a filesystem error carrying `code`. */
+function isErrnoCode(err: unknown, code: string): boolean {
+	return (
+		typeof err === "object" &&
+		err !== null &&
+		"code" in err &&
+		err.code === code
+	);
+}
+
 export class StaticMiddleware {
 	#root: string;
 	#prefix: string;
@@ -156,6 +202,11 @@ export class StaticMiddleware {
 		} catch {
 			return next();
 		}
+
+		// The static root may overlap a local disk's root, where a file made
+		// private carries a visibility marker beside it. Serving it here,
+		// unsigned, would make `setVisibility('private')` protect nothing.
+		if (!(await declaredPublic(realPath))) return next();
 
 		// Quoted and weak (RFC 9110 §8.8.3): the bare md5 hex this used to send
 		// is not a valid entity-tag, and a strict cache may ignore it outright.

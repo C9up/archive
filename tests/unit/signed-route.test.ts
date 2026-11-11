@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createSignedRouteHandler,
 	LocalDriver,
+	StaticMiddleware,
 	StorageManager,
 } from "../../src/index.js";
 import type {
@@ -161,12 +162,63 @@ describe("createSignedRouteHandler", () => {
 		expect(call.error.code).toBe("E_INVALID_SIGNATURE");
 	});
 
-	it("falls through to next() when exp or sig are missing (unsigned passthrough)", async () => {
+	it("falls through to next() for an unsigned request naming no stored file", async () => {
 		const { ctx, response } = buildCtx("GET", "/storage/cat.txt");
 		const next = vi.fn(async () => {});
 		await middleware(ctx, next);
 		expect(next).toHaveBeenCalledTimes(1);
 		expect(response.status).not.toHaveBeenCalled();
+	});
+
+	it("refuses an unsigned request for a private file", async () => {
+		await storage.put("secret.pdf", "top secret", { visibility: "private" });
+		const { ctx, response } = buildCtx("GET", "/storage/secret.pdf");
+		const next = vi.fn(async () => {});
+		await middleware(ctx, next);
+		// Not handed on: whatever is mounted behind (a static server over the
+		// storage root) would serve it without looking at visibility.
+		expect(next).not.toHaveBeenCalled();
+		expect(response.status).toHaveBeenCalledWith(403);
+		expect(response.json).toHaveBeenCalledWith({
+			error: { code: "E_ARCHIVE_ACCESS_DENIED", message: "Access denied" },
+		});
+		expect(response.sendBuffer).not.toHaveBeenCalled();
+	});
+
+	it("refuses a request carrying half a signature for a private file", async () => {
+		await storage.put("secret.pdf", "top secret", { visibility: "private" });
+		const exp = Math.floor(Date.now() / 1000) + 60;
+		for (const query of [`exp=${exp}`, `sig=${"0".repeat(64)}`]) {
+			const { ctx, response } = buildCtx("GET", `/storage/secret.pdf?${query}`);
+			const next = vi.fn(async () => {});
+			await middleware(ctx, next);
+			expect(next).not.toHaveBeenCalled();
+			expect(response.status).toHaveBeenCalledWith(403);
+			expect(response.sendBuffer).not.toHaveBeenCalled();
+		}
+	});
+
+	it("serves an unsigned request for a public file itself", async () => {
+		await storage.put("cat.txt", "hello");
+		const { ctx, response } = buildCtx("GET", "/storage/cat.txt");
+		const next = vi.fn(async () => {});
+		await middleware(ctx, next);
+		expect(next).not.toHaveBeenCalled();
+		expect(response.status).toHaveBeenCalledWith(200);
+		expect(response.sendBuffer).toHaveBeenCalledWith(Buffer.from("hello"));
+	});
+
+	it("does not let a static server mounted behind it serve a private file", async () => {
+		await storage.put("secret.pdf", "top secret", { visibility: "private" });
+		const statics = new StaticMiddleware({
+			root,
+			prefix: "/storage",
+			extensions: [".pdf"],
+		});
+		const { ctx, response } = buildCtx("GET", "/storage/secret.pdf");
+		await middleware(ctx, () => statics.handle(ctx, async () => {}));
+		expect(response.sendBuffer).not.toHaveBeenCalled();
+		expect(response.status).toHaveBeenCalledWith(403);
 	});
 
 	it("rejects a sig matching a different file path", async () => {

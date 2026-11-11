@@ -260,6 +260,39 @@ describe("StaticMiddleware", () => {
 		expect(response.sendBuffer).not.toHaveBeenCalled();
 	});
 
+	it("never serves a file its visibility marker does not declare public", async () => {
+		// The static root may overlap a local disk's root; a file made private
+		// there must not come out of here unsigned.
+		const write = (name: string, marker?: string) => {
+			fs.writeFileSync(path.join(root, name), "content");
+			if (marker !== undefined) {
+				fs.writeFileSync(
+					path.join(root, `${name}.archive-visibility.json`),
+					marker,
+				);
+			}
+		};
+		write("private.txt", JSON.stringify({ visibility: "private" }));
+		write("corrupt.txt", "{not json");
+		write("unknown.txt", JSON.stringify({ visibility: "PUBLIC" }));
+		write("public.txt", JSON.stringify({ visibility: "public" }));
+		write("unmarked.txt");
+
+		const serve = async (name: string) => {
+			const { ctx, response } = makeCtx("GET", `/static/${name}`);
+			const next = vi.fn<() => Promise<void>>(async () => {});
+			await middleware.handle(ctx, next);
+			return { served: response.sendBuffer.mock.calls.length > 0, next };
+		};
+		for (const name of ["private.txt", "corrupt.txt", "unknown.txt"]) {
+			const { served, next } = await serve(name);
+			expect(served, name).toBe(false);
+			expect(next, name).toHaveBeenCalledTimes(1);
+		}
+		expect((await serve("public.txt")).served).toBe(true);
+		expect((await serve("unmarked.txt")).served).toBe(true);
+	});
+
 	it("never serves .archive-visibility.json sidecar files, even if they exist", async () => {
 		// Sidecar is an implementation detail of LocalDriver — exposing
 		// it via static would leak visibility state for a file.

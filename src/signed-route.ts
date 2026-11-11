@@ -4,8 +4,9 @@
  * Verifies the HMAC produced by {@link LocalDriver.getSignedUrl} and,
  * on success, serves the file from the driver. Tampered signatures →
  * 403 `E_INVALID_SIGNATURE`. Expired `exp` → 403 `E_EXPIRED_SIGNATURE`.
- * Missing query params → falls through to `next()` so unsigned routes
- * can coexist on the same prefix.
+ * No signature at all → the file's visibility decides: a public file is
+ * served, a private one refused with 403 `E_ARCHIVE_ACCESS_DENIED`, and a
+ * name that is not stored falls through to `next()`.
  *
  * @implements Story 43.2 AC 5
  */
@@ -113,12 +114,40 @@ export function createSignedRouteHandler(
 		// Pull `exp`/`sig` from the parsed query object — matches
 		// Ream's `Request.qs()` contract (`Record<string, unknown>`).
 		const qs = readQueryObject(ctx);
+		if (qs.exp === undefined && qs.sig === undefined) {
+			// No signature: this route still owns the prefix. Handing every
+			// unsigned request on to `next()` let whatever was mounted behind —
+			// a static server over the storage root, the obvious companion —
+			// serve a PRIVATE file to anyone who left the query off. Visibility
+			// is decided here: a public file is served, a private one refused,
+			// and only a name that is not stored goes on to the next handler.
+			//
+			// NAMED DEVIATION: upstream answers this refusal with 401. It is a
+			// 403 here, as every other refusal of this route already was: no
+			// credential the client could add makes a private file servable
+			// without a signature.
+			if (!(await storage.exists(filePath))) return next();
+			if ((await storage.getVisibility(filePath)) !== "public") {
+				ctx.response.status(403).json({
+					error: { code: "E_ARCHIVE_ACCESS_DENIED", message: "Access denied" },
+				});
+				return;
+			}
+			return serve(ctx, filePath);
+		}
 		const expRaw = readStringParam(qs, "exp");
 		const sigHex = readStringParam(qs, "sig");
 		if (expRaw === null || sigHex === null) {
-			// No signature present — hand off to the next middleware so
-			// unsigned routes (e.g. StaticMiddleware) can handle it.
-			return next();
+			// Half a signature, or one repeated into an array: a request that
+			// tries to use a signature and cannot be verified is refused, never
+			// downgraded to the unsigned path.
+			ctx.response.status(403).json({
+				error: {
+					code: "E_INVALID_SIGNATURE",
+					message: "Malformed signature",
+				},
+			});
+			return;
 		}
 
 		// Validate sig shape up-front: 64 hex chars (sha256). Rejects
@@ -170,6 +199,13 @@ export function createSignedRouteHandler(
 		}
 
 		// Signature verified — serve the file.
+		return serve(ctx, filePath);
+	};
+
+	async function serve(
+		ctx: SignedRouteHttpContext,
+		filePath: string,
+	): Promise<void> {
 		const content = await storage.get(filePath);
 		if (content === null) {
 			ctx.response
@@ -185,7 +221,7 @@ export function createSignedRouteHandler(
 			return;
 		}
 		ctx.response.status(200).sendBuffer(content);
-	};
+	}
 }
 
 /**
