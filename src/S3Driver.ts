@@ -34,6 +34,7 @@ import type {
 	Visibility,
 	WriteOptions,
 } from "./StorageManager.js";
+import { chunkStream, collectToBuffer } from "./streams.js";
 
 /** AWS minimum for a non-final multipart part. */
 const S3_MULTIPART_PART_SIZE = 5 * 1024 * 1024;
@@ -1077,84 +1078,6 @@ function xmlEscape(value: string): string {
 		.replace(/&/g, "&amp;")
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;");
-}
-
-/**
- * Drain a readable into a single Buffer, capped at `maxBytes`. Throws
- * if the stream yields more than that — caller declared a contentLength
- * and we refuse to silently over-buffer.
- */
-/**
- * Type guard for any readable that exposes `destroy()` (Node streams
- * do; a generic `ReadableStream` iterable doesn't). Lets us release
- * file descriptors / sockets without an `as unknown as T` cast.
- */
-function hasDestroy(x: unknown): x is { destroy(err?: Error): void } {
-	return (
-		typeof x === "object" &&
-		x !== null &&
-		typeof (x as { destroy?: unknown }).destroy === "function"
-	);
-}
-
-async function collectToBuffer(
-	readable: NodeJS.ReadableStream,
-	maxBytes: number,
-): Promise<Buffer> {
-	const chunks: Buffer[] = [];
-	let total = 0;
-	for await (const chunk of readable) {
-		const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-		total += buf.length;
-		if (total > maxBytes) {
-			// Destroy the upstream so FDs / sockets don't leak. Without
-			// this, an `fs.createReadStream` or `IncomingMessage` would
-			// stay open for the lifetime of the process.
-			if (hasDestroy(readable)) readable.destroy();
-			throw new Error(
-				`putStream: readable exceeded declared contentLength (${total} > ${maxBytes})`,
-			);
-		}
-		chunks.push(buf);
-	}
-	return Buffer.concat(chunks, total);
-}
-
-/**
- * Async-iterable that yields Buffers of exactly `partSize` bytes (last
- * one may be smaller). Used to slice a stream into S3 multipart parts.
- *
- * **Backpressure.** Memory usage is bounded by `partSize + readable`'s
- * own `highWaterMark`. The `for await` loop pulls from `readable` only
- * when the consumer has finished awaiting the previous yield, so a slow
- * consumer naturally throttles a fast producer through Node's stream
- * pause/resume protocol — `pending` is drained to a single yield before
- * the loop pulls the next chunk. Pass a `Readable` with a tighter
- * `highWaterMark` to lower the peak. Pre-buffered streams (e.g.
- * `Readable.from(buffer)`) bypass this and surface their entire payload
- * in one tick; for those, expect peak ≈ `payload + partSize`.
- */
-async function* chunkStream(
-	readable: NodeJS.ReadableStream,
-	partSize: number,
-): AsyncIterable<Buffer> {
-	let pending: Buffer[] = [];
-	let pendingSize = 0;
-	for await (const chunk of readable) {
-		const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-		pending.push(buf);
-		pendingSize += buf.length;
-		while (pendingSize >= partSize) {
-			const joined = Buffer.concat(pending, pendingSize);
-			yield joined.subarray(0, partSize);
-			const leftover = joined.subarray(partSize);
-			pending = leftover.length > 0 ? [leftover] : [];
-			pendingSize = leftover.length;
-		}
-	}
-	if (pendingSize > 0) {
-		yield Buffer.concat(pending, pendingSize);
-	}
 }
 
 /**

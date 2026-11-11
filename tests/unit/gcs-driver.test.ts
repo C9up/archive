@@ -712,3 +712,133 @@ describe("GcsDriver > visibility read through metadata", () => {
 		fetchSpy.mockRestore();
 	});
 });
+
+/**
+ * putStream used to collect the whole stream into one Buffer before a single
+ * upload: a 4 GB temp file became a 4 GB allocation. It now uploads through a
+ * resumable session, one bounded chunk at a time.
+ */
+describe("GcsDriver > putStream through a resumable session", () => {
+	const SESSION =
+		"https://storage.googleapis.com/upload/storage/v1/b/my-bucket/o?uploadType=resumable&upload_id=abc";
+	const MiB = 1024 * 1024;
+
+	async function bodyLength(body: RequestInit["body"]): Promise<number> {
+		if (body === undefined || body === null) return 0;
+		if (body instanceof Uint8Array) return body.byteLength;
+		if (body instanceof ReadableStream) {
+			let total = 0;
+			const reader = body.getReader();
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) return total;
+				total += value.byteLength;
+			}
+		}
+		return String(body).length;
+	}
+
+	interface Seen {
+		method: string;
+		url: string;
+		headers: Headers;
+		length: number;
+	}
+
+	/** A provider double speaking the resumable protocol. */
+	function provider(options: { location?: string; shortRange?: boolean } = {}) {
+		const seen: Seen[] = [];
+		let persisted = 0;
+		vi.stubGlobal("fetch", async (url: string, init: RequestInit = {}) => {
+			const method = init.method ?? "GET";
+			const headers = new Headers(init.headers);
+			const length = await bodyLength(init.body);
+			seen.push({ method, url, headers, length });
+			if (url.startsWith("https://oauth2.googleapis.com/")) {
+				return new Response(
+					JSON.stringify({ access_token: "t", expires_in: 3600 }),
+					{ status: 200 },
+				);
+			}
+			if (url.includes("uploadType=resumable") && method === "POST") {
+				return new Response(null, {
+					status: 200,
+					headers: { location: options.location ?? SESSION },
+				});
+			}
+			if (method === "DELETE") return new Response(null, { status: 499 });
+			const range = headers.get("content-range") ?? "";
+			if (range.endsWith("/*")) {
+				persisted += length;
+				const reported = options.shortRange ? persisted - 1 : persisted;
+				return new Response(null, {
+					status: 308,
+					headers: { range: `bytes=0-${reported - 1}` },
+				});
+			}
+			return new Response("{}", { status: 200 });
+		});
+		return seen;
+	}
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	function* bytes(total: number, piece = 64 * 1024): Generator<Buffer> {
+		for (let sent = 0; sent < total; sent += piece) {
+			yield Buffer.alloc(Math.min(piece, total - sent), 1);
+		}
+	}
+
+	it("uploads a stream of unknown length in bounded chunks", async () => {
+		const seen = provider();
+		await buildDriver().putStream("big.bin", Readable.from(bytes(20 * MiB)), {
+			contentType: "application/x-big",
+		});
+		const init = seen.find((s) => s.url.includes("uploadType=resumable"));
+		expect(init?.method).toBe("POST");
+		expect(init?.url).toContain("name=big.bin");
+		expect(init?.headers.get("x-upload-content-type")).toBe(
+			"application/x-big",
+		);
+		const chunks = seen.filter((s) => s.url === SESSION && s.method === "PUT");
+		expect(chunks.map((c) => c.headers.get("content-range"))).toEqual([
+			`bytes 0-${8 * MiB - 1}/*`,
+			`bytes ${8 * MiB}-${16 * MiB - 1}/*`,
+			`bytes ${16 * MiB}-${20 * MiB - 1}/${20 * MiB}`,
+		]);
+		// No request ever carried the whole stream.
+		for (const request of seen)
+			expect(request.length).toBeLessThanOrEqual(8 * MiB);
+	});
+
+	it("finishes an empty stream with a zero-length final request", async () => {
+		const seen = provider();
+		await buildDriver().putStream("empty.bin", Readable.from([]));
+		const chunks = seen.filter((s) => s.url === SESSION);
+		expect(chunks.map((c) => c.headers.get("content-range"))).toEqual([
+			"bytes */0",
+		]);
+	});
+
+	it("cancels the session when the provider did not keep a whole chunk", async () => {
+		const seen = provider({ shortRange: true });
+		await expect(
+			buildDriver().putStream("big.bin", Readable.from(bytes(10 * MiB))),
+		).rejects.toThrow(/persisted/);
+		expect(seen.some((s) => s.url === SESSION && s.method === "DELETE")).toBe(
+			true,
+		);
+	});
+
+	it("refuses a session URI that does not point at the provider", async () => {
+		const seen = provider({ location: "https://evil.example/upload" });
+		await expect(
+			buildDriver().putStream("big.bin", Readable.from(bytes(1 * MiB))),
+		).rejects.toMatchObject({ code: "E_ARCHIVE_UNEXPECTED_RESPONSE" });
+		expect(seen.some((s) => s.url.startsWith("https://evil.example"))).toBe(
+			false,
+		);
+	});
+});

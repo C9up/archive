@@ -155,3 +155,17 @@ export async function fetchWithIdleTimeout(
 		headers: response.headers,
 	});
 }
+
+/**
+ * Bytes as a request body, without copying when they can be shared.
+ *
+ * A Node `Buffer` may sit on a `SharedArrayBuffer`, which a request body
+ * cannot be: the view is reused as is over a plain `ArrayBuffer`, and copied
+ * only otherwise.
+ */
+export function requestBody(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+	const { buffer } = bytes;
+	return buffer instanceof ArrayBuffer
+		? new Uint8Array(buffer, bytes.byteOffset, bytes.byteLength)
+		: new Uint8Array(bytes);
+}

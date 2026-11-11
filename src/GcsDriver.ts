@@ -25,7 +25,7 @@ import {
 import { normalizeKey, normalizePrefix } from "./keys.js";
 import { inferMimeType } from "./mime-types.js";
 import { DriveDirectory, DriveFile } from "./objects.js";
-import { fetchWithIdleTimeout } from "./provider-fetch.js";
+import { fetchWithIdleTimeout, requestBody } from "./provider-fetch.js";
 import type {
 	ListAllOptions,
 	ListAllResult,
@@ -37,6 +37,7 @@ import type {
 	Visibility,
 	WriteOptions,
 } from "./StorageManager.js";
+import { chunkStream, collectToBuffer } from "./streams.js";
 
 /** GCS V4 strict URL encoding — identical to AWS's RFC3986-unreserved
  *  set. Duplicated from `S3Driver.ts` on purpose: per cerebrum rule,
@@ -74,16 +75,6 @@ function gcsEncodeKey(key: string): string {
  */
 function gcsEncodeObjectName(key: string): string {
 	return gcsStrictEncode(normalizeKey(key));
-}
-
-/** Type guard matching the same pattern as `S3Driver.hasDestroy` —
- *  duplicated on purpose (package-local). */
-function hasDestroy(x: unknown): x is { destroy(err?: Error): void } {
-	return (
-		typeof x === "object" &&
-		x !== null &&
-		typeof (x as { destroy?: unknown }).destroy === "function"
-	);
 }
 
 /** Base64url encode a Buffer (RFC 4648 §5) — no `=` padding, `-` / `_`
@@ -126,6 +117,12 @@ const GCS_UPLOAD_ROOT = "https://storage.googleapis.com/upload/storage/v1";
 const GCS_META_ROOT = "https://storage.googleapis.com/storage/v1";
 const GCS_OAUTH_URL = "https://oauth2.googleapis.com/token";
 const GCS_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write";
+
+/**
+ * Size of one resumable-upload chunk: 8 MiB. Every chunk but the last must be
+ * a multiple of 256 KiB, and the upload holds at most two in memory.
+ */
+const GCS_RESUMABLE_CHUNK = 32 * 256 * 1024;
 
 export class GcsDriver implements StorageDriver {
 	/**
@@ -212,26 +209,133 @@ export class GcsDriver implements StorageDriver {
 		readable: NodeJS.ReadableStream,
 		options?: PutStreamOptions,
 	): Promise<void> {
-		// Single-PUT path only for this story. Resumable upload parity is
-		// deferred — document upgrade path here when a real large-file
-		// case appears.
-		const maxBytes = options?.contentLength ?? Number.MAX_SAFE_INTEGER;
-		const url = `${GCS_UPLOAD_ROOT}/b/${this.#config.bucket}/o?uploadType=media&name=${gcsEncodeObjectName(filePath)}`;
-		const buf = await collectToBuffer(readable, maxBytes);
-		const token = await this.#getAccessToken();
+		const name = gcsEncodeObjectName(filePath);
 		const mime =
 			options?.contentType ??
 			(inferMimeType(extFromPath(filePath)) || "application/octet-stream");
+		const declared = options?.contentLength;
+		// A declared length that fits in one chunk: one media upload.
+		if (declared !== undefined && declared <= GCS_RESUMABLE_CHUNK) {
+			const url = `${GCS_UPLOAD_ROOT}/b/${this.#config.bucket}/o?uploadType=media&name=${name}`;
+			const buf = await collectToBuffer(readable, declared);
+			const token = await this.#getAccessToken();
+			const res = await this.#fetch(url, {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${token}`,
+					"content-type": mime,
+				},
+				body: requestBody(buf),
+			});
+			if (!res.ok) {
+				throw new Error(`GCS PUT failed (${res.status}): ${await res.text()}`);
+			}
+			return;
+		}
+		// Anything else goes through a resumable session, one bounded chunk at
+		// a time. Collecting the stream first made a 4 GB temp file a 4 GB
+		// allocation before a byte left — and copyFromFs/moveFromFs never
+		// declare a length.
+		const session = await this.#openResumableSession(name, mime);
+		const chunks = chunkStream(readable, GCS_RESUMABLE_CHUNK)[
+			Symbol.asyncIterator
+		]();
+		let offset = 0;
+		try {
+			// One chunk of look-ahead: the request that carries the last chunk
+			// must say it is the last, with the total.
+			let current = await chunks.next();
+			for (;;) {
+				const following = current.done ? current : await chunks.next();
+				const chunk = current.done ? Buffer.alloc(0) : current.value;
+				const last = following.done === true;
+				await this.#uploadChunk(session, chunk, offset, last);
+				offset += chunk.length;
+				if (last) return;
+				current = following;
+			}
+		} catch (err) {
+			// Best-effort: release the session's staged bytes. The original
+			// error is the one that explains the failure.
+			await this.#fetch(session, { method: "DELETE" }).catch(() => {});
+			throw err;
+		}
+	}
+
+	/**
+	 * Start a resumable upload and return its session URI.
+	 *
+	 * The URI comes from the provider's `Location` header and receives the
+	 * object's bytes, so one that does not point at the provider's upload
+	 * endpoint is refused rather than followed.
+	 */
+	async #openResumableSession(name: string, mime: string): Promise<string> {
+		const url = `${GCS_UPLOAD_ROOT}/b/${this.#config.bucket}/o?uploadType=resumable&name=${name}`;
+		const token = await this.#getAccessToken();
 		const res = await this.#fetch(url, {
 			method: "POST",
 			headers: {
 				authorization: `Bearer ${token}`,
-				"content-type": mime,
+				"content-type": "application/json; charset=UTF-8",
+				"x-upload-content-type": mime,
 			},
-			body: buf as BodyInit,
+			body: "{}",
 		});
 		if (!res.ok) {
-			throw new Error(`GCS PUT failed (${res.status}): ${await res.text()}`);
+			throw new Error(
+				`GCS resumable upload could not start (${res.status}): ${await res.text()}`,
+			);
+		}
+		const session = res.headers.get("location");
+		if (session === null || !session.startsWith(`${GCS_UPLOAD_ROOT}/`)) {
+			throw new ArchiveError(
+				"E_ARCHIVE_UNEXPECTED_RESPONSE",
+				`GCS answered a resumable upload with an unusable session URI (${JSON.stringify(session)}).`,
+				{
+					hint: "The upload was not sent anywhere. Retry, or check for a proxy rewriting responses.",
+				},
+			);
+		}
+		return session;
+	}
+
+	/**
+	 * Send one chunk of a resumable upload. A chunk that is not the last is
+	 * a multiple of 256 KiB (see {@link GCS_RESUMABLE_CHUNK}) and must be
+	 * persisted whole before the next is sent.
+	 */
+	async #uploadChunk(
+		session: string,
+		chunk: Buffer,
+		offset: number,
+		last: boolean,
+	): Promise<void> {
+		const end = offset + chunk.length - 1;
+		const total = offset + chunk.length;
+		const range = last
+			? chunk.length === 0
+				? `bytes */${total}`
+				: `bytes ${offset}-${end}/${total}`
+			: `bytes ${offset}-${end}/*`;
+		const res = await this.#fetch(session, {
+			method: "PUT",
+			headers: { "content-range": range },
+			body: requestBody(chunk),
+		});
+		if (last) {
+			if (!res.ok) {
+				throw new Error(
+					`GCS resumable upload failed to finish (${res.status}): ${await res.text()}`,
+				);
+			}
+			return;
+		}
+		// 308 Resume Incomplete, reporting what the provider has kept.
+		const kept = res.headers.get("range");
+		if (res.status !== 308 || kept !== `bytes=0-${end}`) {
+			throw new Error(
+				`GCS resumable upload: chunk at ${offset} not persisted (${res.status}, range ${JSON.stringify(kept)}).`,
+			);
 		}
 	}
 
@@ -673,27 +777,4 @@ function extFromPath(filePath: string): string {
 	const idx = filePath.lastIndexOf(".");
 	if (idx < 0) return "";
 	return filePath.slice(idx).toLowerCase();
-}
-
-/** Drain a readable into a Buffer, capped at `maxBytes`. Destroys the
- *  upstream on over-limit so FDs/sockets don't leak. Duplicated from
- *  `S3Driver.ts` per package-agnostic discipline. */
-async function collectToBuffer(
-	readable: NodeJS.ReadableStream,
-	maxBytes: number,
-): Promise<Buffer> {
-	const chunks: Buffer[] = [];
-	let total = 0;
-	for await (const chunk of readable) {
-		const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
-		total += buf.length;
-		if (total > maxBytes) {
-			if (hasDestroy(readable)) readable.destroy();
-			throw new Error(
-				`putStream: readable exceeded declared contentLength (${total} > ${maxBytes})`,
-			);
-		}
-		chunks.push(buf);
-	}
-	return Buffer.concat(chunks, total);
 }
