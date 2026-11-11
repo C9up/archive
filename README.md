@@ -1,8 +1,8 @@
 # @c9up/archive
 
-> File storage abstraction for the Ream framework — Local + S3-compatible drivers, signed URLs, expiry.
+> File storage abstraction for the Ream framework — local, S3-compatible and GCS drivers, signed URLs, expiry.
 
-Part of **[Ream](https://github.com/C9up/ream)** — a Rust-powered, AdonisJS-compatible Node.js framework. Independent, publishable package.
+Part of **[Ream](https://github.com/C9up/ream)** — a Rust-powered Node.js framework. Independent, publishable package.
 
 ## Installation
 
@@ -23,6 +23,20 @@ Register the provider in your app, then configure it under `config/archive.ts`:
 providers: [
   () => import('@c9up/archive/provider'),
 ]
+```
+
+## Serving local files
+
+A local disk builds its URLs under its `routeBasePath` (default `/storage`).
+Mount the signed route on that path: it reads the prefix from the driver,
+serves public files, refuses private ones unless the URL carries a valid
+signature (from `getSignedUrl`), and streams the file with an ETag so a
+client revalidating its copy gets a 304.
+
+```ts
+import { createSignedRouteHandler } from '@c9up/archive/signed-route'
+
+const handler = createSignedRouteHandler({ storage, driver })
 ```
 
 ## Entry points
