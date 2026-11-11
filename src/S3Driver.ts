@@ -21,6 +21,7 @@ import {
 	parseExpiry,
 } from "./expiry.js";
 import { DriveDirectory, DriveFile } from "./objects.js";
+import { fetchWithIdleTimeout } from "./provider-fetch.js";
 import type {
 	ListAllOptions,
 	ListAllResult,
@@ -67,39 +68,32 @@ export interface S3Config {
 	secretAccessKey: string;
 	publicUrl?: string;
 	/**
-	 * How long one request to the provider may take, in ms. Default 30 000.
+	 * How long the provider may stay silent during one request, in ms.
+	 * Default 30 000.
 	 *
-	 * Without a bound a hung connection never settles: the handler awaiting it
-	 * waits forever, and enough of them stop the server from serving. Set 0 to
-	 * disable, which only makes sense behind an outer timeout.
+	 * An idle bound, not a deadline: it runs while the provider is awaited
+	 * (taking the request body, sending headers, sending the next chunk), so a
+	 * long transfer that keeps moving is never cut. Without a bound a hung
+	 * connection never settles: the handler awaiting it waits forever, and
+	 * enough of them stop the server from serving. Set 0 to disable, which
+	 * only makes sense behind an outer timeout.
 	 */
 	requestTimeoutMs?: number;
 }
 
 export class S3Driver implements StorageDriver {
 	/**
-	 * One request to the provider, bounded by {@link S3Config.requestTimeoutMs}.
-	 *
-	 * `AbortSignal.timeout` aborts the socket, so a hung connection surfaces as
-	 * an error the caller can retry instead of a promise that never settles.
+	 * One request to the provider, bounded by {@link S3Config.requestTimeoutMs}
+	 * as an idle timeout (see `provider-fetch.ts`): a hung connection surfaces
+	 * as an error the caller can retry, a long transfer that keeps moving does
+	 * not.
 	 */
-	async #fetch(url: string, init: RequestInit = {}): Promise<Response> {
-		const ms = this.#config.requestTimeoutMs ?? 30_000;
-		if (ms <= 0) return fetch(url, init);
-		try {
-			return await fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
-		} catch (err) {
-			if (err instanceof Error && err.name === "TimeoutError") {
-				throw new ArchiveError(
-					"E_ARCHIVE_REQUEST_TIMEOUT",
-					`The storage provider did not answer within ${ms}ms.`,
-					{
-						hint: "Raise `requestTimeoutMs` for large objects, or check connectivity to the bucket.",
-					},
-				);
-			}
-			throw err;
-		}
+	#fetch(url: string, init: RequestInit = {}): Promise<Response> {
+		return fetchWithIdleTimeout(
+			url,
+			init,
+			this.#config.requestTimeoutMs ?? 30_000,
+		);
 	}
 
 	#config: S3Config;
