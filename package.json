@@ -34,6 +34,7 @@
   },
   "peerDependencies": {
     "@c9up/helix": "^0.2.0",
+    "@c9up/inker": "^0.1.20",
     "@c9up/ream": "^0.2.26"
   },
   "scripts": {
@@ -96,6 +97,9 @@
   },
   "peerDependenciesMeta": {
     "@c9up/helix": {
+      "optional": true
+    },
+    "@c9up/inker": {
       "optional": true
     },
     "@c9up/ream": {

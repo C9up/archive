@@ -6,7 +6,7 @@ import { Secret } from "@c9up/ream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArchiveAppContext } from "../../src/ArchiveProvider.js";
 import ArchiveProvider from "../../src/ArchiveProvider.js";
-import { services } from "../../src/DriveManager.js";
+import { DriveManager, services } from "../../src/DriveManager.js";
 import { StorageManager } from "../../src/index.js";
 
 /**
@@ -423,5 +423,108 @@ describe("ArchiveProvider > shutdown", () => {
 		await provider.shutdown();
 
 		expect(getStorage()).toBe(replacement);
+	});
+});
+
+/**
+ * The template engine is an optional peer: what the provider sees of it is
+ * its module singleton, which queues plugins and publishes globals. This
+ * stands in for it and records what was published.
+ */
+const engine = vi.hoisted(() => {
+	const plugins: Array<(target: unknown) => void> = [];
+	return {
+		plugins,
+		use(plugin: (target: unknown) => void): void {
+			plugins.push(plugin);
+		},
+	};
+});
+vi.mock("@c9up/inker", () => ({ default: engine }));
+
+describe("ArchiveProvider > template helpers", () => {
+	afterEach(() => {
+		engine.plugins.length = 0;
+	});
+
+	/** Run the queued plugins against a recording engine, as a render would. */
+	function publishedGlobals(): Map<string, unknown> {
+		const globals = new Map<string, unknown>();
+		for (const plugin of engine.plugins) {
+			plugin({
+				global(name: string, value: unknown) {
+					globals.set(name, value);
+				},
+			});
+		}
+		return globals;
+	}
+
+	function callable(value: unknown): (...args: unknown[]) => unknown {
+		if (typeof value !== "function") throw new Error("not a function");
+		return (...args) => Reflect.apply(value, undefined, args);
+	}
+
+	it("publishes driveUrl and driveSignedUrl when the app renders with inker", async () => {
+		const app = {
+			...buildApp({
+				archive: {
+					default: "public",
+					services: {
+						public: services.fs({
+							location: tempRoot(),
+							signingSecret: "s".repeat(32),
+						}),
+						files: services.fs({
+							location: tempRoot(),
+							signingSecret: "f".repeat(32),
+							routeBasePath: "/files",
+						}),
+					},
+				},
+			}),
+			usingInker: true,
+		};
+		const provider = new ArchiveProvider(app);
+		provider.register();
+		await provider.boot();
+
+		const globals = publishedGlobals();
+		const driveUrl = callable(globals.get("driveUrl"));
+		const driveSignedUrl = callable(globals.get("driveSignedUrl"));
+
+		const drive = await app.container.resolve<DriveManager>(DriveManager);
+		await drive.use().put("a.txt", "x");
+		await drive.use("files").put("b.txt", "x");
+		await drive.use("files").setVisibility("b.txt", "private");
+
+		expect(await driveUrl("a.txt")).toBe("/storage/a.txt");
+		expect(await driveUrl("b.txt", "files")).toMatch(
+			/^\/files\/b\.txt\?exp=\d+&sig=[0-9a-f]{64}$/,
+		);
+		expect(await driveSignedUrl("a.txt")).toMatch(/^\/storage\/a\.txt\?exp=/);
+		expect(await driveSignedUrl("b.txt", "files")).toMatch(
+			/^\/files\/b\.txt\?exp=/,
+		);
+		// Options in the disk's place, as the second argument.
+		const exp = (url: unknown) =>
+			Number(new URL(String(url), "http://x").searchParams.get("exp"));
+		const now = Math.floor(Date.now() / 1000);
+		expect(
+			exp(await driveSignedUrl("a.txt", { expiresIn: 60 })),
+		).toBeLessThanOrEqual(now + 61);
+		expect(
+			exp(await driveSignedUrl("b.txt", "files", { expiresIn: 60 })),
+		).toBeLessThanOrEqual(now + 61);
+	});
+
+	it("publishes nothing when the app does not use inker", async () => {
+		const app = buildApp({
+			archive: { driver: "local", local: { root: tempRoot() } },
+		});
+		const provider = new ArchiveProvider(app);
+		provider.register();
+		await provider.boot();
+		expect(engine.plugins).toHaveLength(0);
 	});
 });

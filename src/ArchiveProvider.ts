@@ -30,6 +30,7 @@ import { type S3Config, S3Driver } from "./S3Driver.js";
 import {
 	LocalDriver,
 	type ReleasableSecret,
+	type SignedUrlOptions,
 	type StorageDriver,
 	StorageManager,
 } from "./StorageManager.js";
@@ -50,6 +51,8 @@ interface ArchiveConfigStore {
 export interface ArchiveAppContext {
 	container: ArchiveContainer;
 	config: ArchiveConfigStore;
+	/** Set by inker's provider when the app renders views with it. */
+	usingInker?: boolean;
 }
 
 /**
@@ -84,6 +87,9 @@ export default class ArchiveProvider {
 	 */
 	#storage: (() => StorageManager) | undefined;
 
+	/** The lazily-built disk manager behind it, likewise set by register(). */
+	#drive: (() => DriveManager) | undefined;
+
 	constructor(protected app: ArchiveAppContext) {}
 
 	register(): void {
@@ -113,6 +119,7 @@ export default class ArchiveProvider {
 			return manager;
 		};
 		this.#storage = storageManager;
+		this.#drive = driveManager;
 
 		this.app.container.singleton(DriveManager, () => driveManager());
 		// Backward-compatible bindings — the default disk is what apps
@@ -143,6 +150,7 @@ export default class ArchiveProvider {
 		// The accessor reads the same cell the container's bindings read, so
 		// however storage is reached there is one manager behind it.
 		setStorageResolver(storage);
+		await this.#registerViewHelpers();
 
 		// No eager construction when archive is unconfigured: an app that
 		// registers this provider and never uses storage should not trigger
@@ -165,6 +173,63 @@ export default class ArchiveProvider {
 		setStorage(manager);
 	}
 
+	/**
+	 * Publish `driveUrl` and `driveSignedUrl` to templates, as upstream's
+	 * provider does for its view engine:
+	 *
+	 *   {{ await driveUrl(user.avatar) }}
+	 *   {{ await driveSignedUrl(invoice.pdf, 'invoices', { expiresIn: '1h' }) }}
+	 *
+	 * Only when the app renders with inker (its provider sets `usingInker`),
+	 * through inker's module singleton — the same way the i18n package
+	 * publishes its globals, for the same reason: the engine's container
+	 * binding is not resolvable during boot, while the singleton's `use()`
+	 * queues the plugin until the first render. Nothing is built here: each
+	 * helper resolves the disk when a template calls it.
+	 */
+	async #registerViewHelpers(): Promise<void> {
+		const drive = this.#drive;
+		if (this.app.usingInker !== true || drive === undefined) return;
+		// Computed: inker is an optional peer, so a bundler must not try to
+		// resolve it for an application that does not install it.
+		const specifier = "@c9up/inker";
+		const loaded: unknown = await import(/* @vite-ignore */ specifier);
+		const engine =
+			typeof loaded === "object" && loaded !== null
+				? Reflect.get(loaded, "default")
+				: undefined;
+		const plugin = (target: unknown): void => {
+			if (!publishesGlobals(target)) return;
+			target.global("driveUrl", (key: string, disk?: string) =>
+				drive().use(disk).getUrl(key),
+			);
+			target.global(
+				"driveSignedUrl",
+				(
+					key: string,
+					diskOrOptions?: string | SignedUrlOptions,
+					options?: SignedUrlOptions,
+				) =>
+					typeof diskOrOptions === "string"
+						? drive().use(diskOrOptions).getSignedUrl(key, options)
+						: drive()
+								.use()
+								.getSignedUrl(key, diskOrOptions ?? options),
+			);
+		};
+		if (isPluggable(engine)) engine.use(plugin);
+		else if (publishesGlobals(engine)) plugin(engine);
+		else {
+			throw new ArchiveError(
+				"E_ARCHIVE_TEMPLATE_ENGINE",
+				"The app renders with inker, but its module exposes neither use() nor global(): the drive template helpers cannot be published.",
+				{
+					hint: "Install a @c9up/inker version whose default export has use(plugin) or global(name, value).",
+				},
+			);
+		}
+	}
+
 	async start(): Promise<void> {}
 	async ready(): Promise<void> {}
 	async shutdown(): Promise<void> {
@@ -176,6 +241,30 @@ export default class ArchiveProvider {
 			clearStorage();
 		this.#owned = undefined;
 	}
+}
+
+/** An engine that queues plugins until it renders: inker's module singleton. */
+function isPluggable(
+	value: unknown,
+): value is { use(plugin: (target: unknown) => void): unknown } {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"use" in value &&
+		typeof value.use === "function"
+	);
+}
+
+/** An engine that publishes template globals. */
+function publishesGlobals(
+	value: unknown,
+): value is { global(name: string, value: unknown): unknown } {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"global" in value &&
+		typeof value.global === "function"
+	);
 }
 
 /** Narrow an unknown config value to the multi-disk {@link DriveConfig} shape. */
