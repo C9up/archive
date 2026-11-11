@@ -1,9 +1,13 @@
+/// <reference lib="dom" />
+// Uses the WHATWG streams globals, which live in the DOM lib even on Node.
 /**
- * Stream helpers shared by the cloud drivers' uploads.
+ * Stream helpers shared by the cloud drivers.
  */
 
+import { Readable } from "node:stream";
+
 /** A chunk of a Node readable as bytes (string chunks are UTF-8). */
-function toBuffer(chunk: unknown): Buffer {
+export function toBuffer(chunk: unknown): Buffer {
 	if (Buffer.isBuffer(chunk)) return chunk;
 	if (chunk instanceof Uint8Array) return Buffer.from(chunk);
 	return Buffer.from(String(chunk));
@@ -83,4 +87,32 @@ export async function* chunkStream(
 	if (pendingSize > 0) {
 		yield Buffer.concat(pending, pendingSize);
 	}
+}
+
+/**
+ * A WHATWG response body as a Node readable, without a cast between the DOM
+ * and `node:stream/web` typings of the same runtime object.
+ *
+ * Destroying the readable before the end cancels the body, so the
+ * connection behind it is released instead of left to the collector.
+ */
+export function nodeReadable(body: ReadableStream<Uint8Array>): Readable {
+	async function* chunks(): AsyncGenerator<Buffer> {
+		const reader = body.getReader();
+		let finished = false;
+		try {
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) {
+					finished = true;
+					return;
+				}
+				yield Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+			}
+		} finally {
+			if (!finished) await reader.cancel().catch(() => {});
+			reader.releaseLock();
+		}
+	}
+	return Readable.from(chunks(), { objectMode: false });
 }

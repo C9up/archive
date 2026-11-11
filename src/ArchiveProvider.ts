@@ -184,8 +184,8 @@ function isDriveConfig(config: unknown): config is DriveConfig {
 		typeof config === "object" &&
 		config !== null &&
 		"services" in config &&
-		typeof (config as { services: unknown }).services === "object" &&
-		(config as { services: unknown }).services !== null
+		typeof config.services === "object" &&
+		config.services !== null
 	);
 }
 

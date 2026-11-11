@@ -166,6 +166,10 @@ describe("archive > LocalDriver > url() visibility-aware routing", () => {
 			'{"visibility":{"nested":"private"}}',
 			"[]",
 			'"private"',
+			// Valid JSON that is no object at all: reading a field of it used to
+			// throw a TypeError instead of the corruption error.
+			"null",
+			"42",
 		]) {
 			await fsp.writeFile(sidecar, body);
 			await expect(driver.getVisibility("w.txt"), body).rejects.toMatchObject({

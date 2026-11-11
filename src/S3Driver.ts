@@ -13,7 +13,6 @@
 
 import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
-import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { ArchiveError } from "./errors.js";
 import {
 	assertValidExpiry,
@@ -22,7 +21,7 @@ import {
 } from "./expiry.js";
 import { normalizeKey, normalizePrefix } from "./keys.js";
 import { DriveDirectory, DriveFile } from "./objects.js";
-import { fetchWithIdleTimeout } from "./provider-fetch.js";
+import { fetchWithIdleTimeout, requestBody } from "./provider-fetch.js";
 import type {
 	ListAllOptions,
 	ListAllResult,
@@ -34,7 +33,7 @@ import type {
 	Visibility,
 	WriteOptions,
 } from "./StorageManager.js";
-import { chunkStream, collectToBuffer } from "./streams.js";
+import { chunkStream, collectToBuffer, nodeReadable } from "./streams.js";
 
 /** AWS minimum for a non-final multipart part. */
 const S3_MULTIPART_PART_SIZE = 5 * 1024 * 1024;
@@ -155,7 +154,7 @@ export class S3Driver implements StorageDriver {
 		const res = await this.#fetch(url, {
 			method: "PUT",
 			headers,
-			body: body as BodyInit,
+			body: requestBody(body),
 		});
 		if (!res.ok) {
 			throw new Error(`S3 PUT failed (${res.status}): ${await res.text()}`);
@@ -184,7 +183,7 @@ export class S3Driver implements StorageDriver {
 			const res = await this.#fetch(url, {
 				method: "PUT",
 				headers,
-				body: body as BodyInit,
+				body: requestBody(body),
 			});
 			if (!res.ok) {
 				throw new Error(`S3 PUT failed (${res.status}): ${await res.text()}`);
@@ -249,11 +248,7 @@ export class S3Driver implements StorageDriver {
 			// Edge case: 200 with no body. Return an empty readable.
 			return Readable.from(Buffer.alloc(0));
 		}
-		// Node's `Readable.fromWeb` expects the `node:stream/web` variant,
-		// while `this.#fetch().body` gives the lib.dom variant. Runtime shape is
-		// identical — the difference is only in TS lib typings. A single
-		// cast to the node-side type is enough (no `unknown` pivot).
-		return Readable.fromWeb(res.body as NodeReadableStream<Uint8Array>);
+		return nodeReadable(res.body);
 	}
 
 	async get(filePath: string): Promise<Buffer | null> {
@@ -642,7 +637,7 @@ export class S3Driver implements StorageDriver {
 		const res = await this.#fetch(url, {
 			method: "POST",
 			headers,
-			body: body as BodyInit,
+			body: requestBody(body),
 		});
 		if (!res.ok) {
 			throw new Error(
@@ -934,7 +929,7 @@ export class S3Driver implements StorageDriver {
 		const res = await this.#fetch(url, {
 			method: "PUT",
 			headers,
-			body: body as BodyInit,
+			body: requestBody(body),
 		});
 		if (!res.ok) {
 			throw new Error(
@@ -976,7 +971,7 @@ export class S3Driver implements StorageDriver {
 		const res = await this.#fetch(url, {
 			method: "POST",
 			headers: signed,
-			body: xmlBody as BodyInit,
+			body: requestBody(xmlBody),
 		});
 		if (!res.ok) {
 			throw new Error(

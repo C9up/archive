@@ -16,6 +16,13 @@ function defined<T>(value: T | null | undefined): T {
 	return value;
 }
 
+/** A request body as the text that went on the wire. */
+function bodyText(body: RequestInit["body"]): string {
+	return body instanceof Uint8Array
+		? Buffer.from(body).toString("utf8")
+		: String(body);
+}
+
 async function drainStream(readable: NodeJS.ReadableStream): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of readable) {
@@ -369,11 +376,11 @@ describe("S3Driver", () => {
 			// Call 4: POST ?uploadId=… with the Complete XML
 			const completeCall = fetchSpy.mock.calls[3];
 			expect(String(completeCall?.[0])).toContain("uploadId=test-upload-id");
-			const completeBody = requestInit(3).body as Buffer;
-			expect(completeBody.toString("utf8")).toContain(
+			const completeBody = bodyText(requestInit(3).body);
+			expect(completeBody).toContain(
 				'<PartNumber>1</PartNumber><ETag>"etag-1"</ETag>',
 			);
-			expect(completeBody.toString("utf8")).toContain(
+			expect(completeBody).toContain(
 				'<PartNumber>2</PartNumber><ETag>"etag-2"</ETag>',
 			);
 		});
@@ -683,8 +690,8 @@ describe("S3Driver > deleting a whole prefix", () => {
 		const headers = init.headers as Record<string, string>;
 		// S3 refuses a DeleteObjects with no Content-MD5.
 		expect(headers["content-md5"]).toBeTruthy();
-		expect(String(init.body)).toContain("<Key>cat/a.txt</Key>");
-		expect(String(init.body)).toContain("<Key>cat/b.txt</Key>");
+		expect(bodyText(init.body)).toContain("<Key>cat/a.txt</Key>");
+		expect(bodyText(init.body)).toContain("<Key>cat/b.txt</Key>");
 	});
 
 	it("escapes a key that would otherwise break the request body", async () => {
@@ -694,7 +701,7 @@ describe("S3Driver > deleting a whole prefix", () => {
 		await driver.deleteAll("cat/");
 
 		const init = fetchSpy.mock.calls[1]?.[1] as RequestInit;
-		expect(String(init.body)).toContain("a&amp;b.txt");
+		expect(bodyText(init.body)).toContain("a&amp;b.txt");
 	});
 
 	it("reads the keys S3 lists XML-escaped as the objects they name", async () => {
@@ -723,7 +730,7 @@ describe("S3Driver > deleting a whole prefix", () => {
 		fetchSpy.mockResolvedValueOnce(page(listed));
 		fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
 		await driver.deleteAll("cat/");
-		const body = String(fetchSpy.mock.calls.at(-1)?.[1]?.body);
+		const body = bodyText(fetchSpy.mock.calls.at(-1)?.[1]?.body);
 		// Escaped once, as the objects' real names — not escaped a second time.
 		expect(body).toContain("<Key>cat/a&amp;b.txt</Key>");
 		expect(body).toContain("<Key>cat/x&lt;y&gt;.txt</Key>");

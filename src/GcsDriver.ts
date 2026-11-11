@@ -15,7 +15,6 @@
 
 import { createHash, createSign } from "node:crypto";
 import { Readable } from "node:stream";
-import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { ArchiveError } from "./errors.js";
 import {
 	assertValidExpiry,
@@ -37,7 +36,7 @@ import type {
 	Visibility,
 	WriteOptions,
 } from "./StorageManager.js";
-import { chunkStream, collectToBuffer } from "./streams.js";
+import { chunkStream, collectToBuffer, nodeReadable } from "./streams.js";
 
 /** GCS V4 strict URL encoding — identical to AWS's RFC3986-unreserved
  *  set. Duplicated from `S3Driver.ts` on purpose: per cerebrum rule,
@@ -179,7 +178,7 @@ export class GcsDriver implements StorageDriver {
 		const res = await this.#fetch(url, {
 			method: "POST",
 			headers,
-			body: body as BodyInit,
+			body: requestBody(body),
 		});
 		if (!res.ok) {
 			throw new Error(`GCS PUT failed (${res.status}): ${await res.text()}`);
@@ -369,7 +368,7 @@ export class GcsDriver implements StorageDriver {
 		}
 		if (!res.ok) throw new Error(`GCS GET failed (${res.status})`);
 		if (res.body === null) return Readable.from(Buffer.alloc(0));
-		return Readable.fromWeb(res.body as NodeReadableStream<Uint8Array>);
+		return nodeReadable(res.body);
 	}
 
 	async delete(filePath: string): Promise<boolean> {
@@ -430,31 +429,26 @@ export class GcsDriver implements StorageDriver {
 		if (!res.ok) {
 			throw new Error(`GCS HEAD failed (${res.status}): ${await res.text()}`);
 		}
-		const json = (await res.json()) as {
-			size?: string;
-			contentType?: string;
-			updated?: string;
-			etag?: string;
-			acl?: Array<{ entity?: string; role?: string }>;
-		};
-		const visibility: Visibility = Array.isArray(json.acl)
-			? json.acl.some(
-					(a) =>
-						a.entity === "allUsers" &&
-						(a.role === "READER" || a.role === "OWNER"),
-				)
-				? "public"
-				: "private"
+		const json = await jsonObject(res, "an object metadata request");
+		// Public only on an explicit allUsers grant: an ACL that is missing or
+		// shaped unexpectedly reads as private.
+		const visibility: Visibility = records(json, "acl").some(
+			(grant) =>
+				text(grant, "entity") === "allUsers" &&
+				(text(grant, "role") === "READER" || text(grant, "role") === "OWNER"),
+		)
+			? "public"
 			: "private";
-		const size = Number.parseInt(json.size ?? "0", 10);
-		const mimeType = json.contentType ?? "application/octet-stream";
+		const size = Number.parseInt(text(json, "size") ?? "0", 10);
+		const mimeType = text(json, "contentType") ?? "application/octet-stream";
+		const updated = text(json, "updated");
 		return {
 			size,
 			contentLength: size,
 			mimeType,
 			contentType: mimeType,
-			lastModified: json.updated ? new Date(json.updated) : new Date(0),
-			etag: (json.etag ?? "").replace(/^(W\/)?"(.*)"$/, "$1$2"),
+			lastModified: updated ? new Date(updated) : new Date(0),
+			etag: (text(json, "etag") ?? "").replace(/^(W\/)?"(.*)"$/, "$1$2"),
 			visibility,
 		};
 	}
@@ -561,37 +555,28 @@ export class GcsDriver implements StorageDriver {
 		if (!res.ok) {
 			throw new Error(`GCS LIST failed (${res.status}): ${await res.text()}`);
 		}
-		const json = (await res.json()) as {
-			items?: Array<{
-				name?: string;
-				size?: string;
-				updated?: string;
-				contentType?: string;
-				etag?: string;
-			}>;
-			prefixes?: string[];
-			nextPageToken?: string;
-		};
+		const json = await jsonObject(res, "a listing");
 		const objects: Array<DriveFile | DriveDirectory> = [];
-		for (const dir of json.prefixes ?? []) {
+		for (const dir of texts(json, "prefixes")) {
 			objects.push(new DriveDirectory(dir.replace(/\/$/, "")));
 		}
-		for (const item of json.items ?? []) {
-			const size = Number.parseInt(item.size ?? "0", 10);
-			const mimeType = item.contentType ?? "application/octet-stream";
+		for (const item of records(json, "items")) {
+			const size = Number.parseInt(text(item, "size") ?? "0", 10);
+			const mimeType = text(item, "contentType") ?? "application/octet-stream";
+			const updated = text(item, "updated");
 			objects.push(
-				new DriveFile(item.name ?? "", this, {
+				new DriveFile(text(item, "name") ?? "", this, {
 					size,
 					contentLength: size,
 					mimeType,
 					contentType: mimeType,
-					lastModified: item.updated ? new Date(item.updated) : new Date(0),
-					etag: (item.etag ?? "").replace(/^(W\/)?"(.*)"$/, "$1$2"),
+					lastModified: updated ? new Date(updated) : new Date(0),
+					etag: (text(item, "etag") ?? "").replace(/^(W\/)?"(.*)"$/, "$1$2"),
 					visibility: "private",
 				}),
 			);
 		}
-		return { paginationToken: json.nextPageToken, objects };
+		return { paginationToken: text(json, "nextPageToken"), objects };
 	}
 
 	async *list(given: string): AsyncIterable<StorageEntry> {
@@ -609,18 +594,16 @@ export class GcsDriver implements StorageDriver {
 			if (!res.ok) {
 				throw new Error(`GCS LIST failed (${res.status}): ${await res.text()}`);
 			}
-			const json = (await res.json()) as {
-				items?: Array<{ name?: string; size?: string; updated?: string }>;
-				nextPageToken?: string;
-			};
-			for (const item of json.items ?? []) {
+			const json = await jsonObject(res, "a listing");
+			for (const item of records(json, "items")) {
+				const updated = text(item, "updated");
 				yield {
-					path: item.name ?? "",
-					size: Number.parseInt(item.size ?? "0", 10),
-					lastModified: item.updated ? new Date(item.updated) : new Date(0),
+					path: text(item, "name") ?? "",
+					size: Number.parseInt(text(item, "size") ?? "0", 10),
+					lastModified: updated ? new Date(updated) : new Date(0),
 				};
 			}
-			pageToken = json.nextPageToken;
+			pageToken = text(json, "nextPageToken");
 		} while (pageToken);
 	}
 
@@ -752,18 +735,18 @@ export class GcsDriver implements StorageDriver {
 				`GCS token exchange failed (${res.status}): ${await res.text()}`,
 			);
 		}
-		const json = (await res.json()) as {
-			access_token?: string;
-			expires_in?: number;
-		};
-		if (!json.access_token) {
+		const json = await jsonObject(res, "the token exchange");
+		const accessToken = text(json, "access_token");
+		if (!accessToken) {
 			throw new Error("GCS token exchange: access_token missing from response");
 		}
+		const expiresIn =
+			typeof json.expires_in === "number" ? json.expires_in : 3600;
 		this.#cachedToken = {
-			value: json.access_token,
-			expiresAt: now + (json.expires_in ?? 3600) * 1000,
+			value: accessToken,
+			expiresAt: now + expiresIn * 1000,
 		};
-		return json.access_token;
+		return accessToken;
 	}
 }
 
@@ -777,4 +760,54 @@ function extFromPath(filePath: string): string {
 	const idx = filePath.lastIndexOf(".");
 	if (idx < 0) return "";
 	return filePath.slice(idx).toLowerCase();
+}
+
+/**
+ * A provider response body that must be a JSON object. Each field is then
+ * read through {@link text}/{@link records}/{@link texts}, which check its
+ * type instead of asserting the whole shape.
+ */
+async function jsonObject(
+	res: Response,
+	what: string,
+): Promise<Record<string, unknown>> {
+	const json: unknown = await res.json();
+	if (!isRecord(json)) {
+		throw new ArchiveError(
+			"E_ARCHIVE_UNEXPECTED_RESPONSE",
+			`GCS answered ${what} with something other than a JSON object.`,
+			{ hint: "Check for a proxy rewriting responses to the storage API." },
+		);
+	}
+	return json;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A string field, or `undefined` when absent or of another type. */
+function text(
+	record: Record<string, unknown>,
+	key: string,
+): string | undefined {
+	const value = record[key];
+	return typeof value === "string" ? value : undefined;
+}
+
+/** The object entries of an array field; anything else is left out. */
+function records(
+	record: Record<string, unknown>,
+	key: string,
+): Record<string, unknown>[] {
+	const value = record[key];
+	return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+/** The string entries of an array field; anything else is left out. */
+function texts(record: Record<string, unknown>, key: string): string[] {
+	const value = record[key];
+	return Array.isArray(value)
+		? value.filter((entry): entry is string => typeof entry === "string")
+		: [];
 }

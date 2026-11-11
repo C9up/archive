@@ -10,7 +10,7 @@
  * Populated by `ArchiveProvider.boot()`.
  */
 
-import type { StorageManager } from "../StorageManager.js";
+import { StorageManager } from "../StorageManager.js";
 
 let instance: StorageManager | undefined;
 let resolve: (() => StorageManager) | undefined;
@@ -53,7 +53,20 @@ export function clearStorage(): void {
 	instance = undefined;
 }
 
-const storage: StorageManager = new Proxy({} as StorageManager, {
+/**
+ * The proxy's target: an object of the right type that is never used —
+ * every read goes to the bound instance through the `get` trap. Built from
+ * the prototype and proven by `instanceof`, so no cast stands in for it.
+ */
+function inertTarget(): StorageManager {
+	const target: unknown = Object.create(StorageManager.prototype);
+	if (!(target instanceof StorageManager)) {
+		throw new Error("[archive] could not build the storage accessor");
+	}
+	return target;
+}
+
+const storage: StorageManager = new Proxy(inertTarget(), {
 	get(_target, prop) {
 		// A module loader inspects what it imports before anyone uses it: it reads
 		// `then` to decide whether the namespace is thenable, and various symbols

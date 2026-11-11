@@ -842,3 +842,56 @@ describe("GcsDriver > putStream through a resumable session", () => {
 		);
 	});
 });
+
+/**
+ * Provider JSON used to be asserted into shape with `as`: a body that was not
+ * the expected object crashed on a property read, or was trusted as-is.
+ */
+describe("GcsDriver > provider responses are checked, not asserted", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	function answer(body: string) {
+		vi.stubGlobal("fetch", async (url: string) => {
+			if (url.startsWith("https://oauth2.googleapis.com/")) {
+				return new Response(
+					JSON.stringify({ access_token: "t", expires_in: 3600 }),
+					{ status: 200 },
+				);
+			}
+			return new Response(body, { status: 200 });
+		});
+	}
+
+	it("refuses metadata that is not a JSON object", async () => {
+		for (const body of ["null", "[]", '"x"', "42"]) {
+			answer(body);
+			await expect(
+				buildDriver().getMetadata("a.txt"),
+				body,
+			).rejects.toMatchObject({ code: "E_ARCHIVE_UNEXPECTED_RESPONSE" });
+		}
+	});
+
+	it("reads a malformed ACL as private, and ignores mistyped fields", async () => {
+		answer(
+			JSON.stringify({
+				size: 12,
+				contentType: ["text/plain"],
+				acl: [null, "allUsers", { entity: "allUsers", role: 1 }],
+			}),
+		);
+		const meta = await buildDriver().getMetadata("a.txt");
+		expect(meta.visibility).toBe("private");
+		expect(meta.size).toBe(0);
+		expect(meta.contentType).toBe("application/octet-stream");
+	});
+
+	it("refuses a token answer that is not a JSON object", async () => {
+		vi.stubGlobal("fetch", async () => new Response("[]", { status: 200 }));
+		await expect(buildDriver().exists("a.txt")).rejects.toMatchObject({
+			code: "E_ARCHIVE_UNEXPECTED_RESPONSE",
+		});
+	});
+});

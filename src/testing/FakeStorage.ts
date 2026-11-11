@@ -37,6 +37,7 @@ import type {
 	WriteOptions,
 } from "../StorageManager.js";
 import { StorageManager } from "../StorageManager.js";
+import { toBuffer } from "../streams.js";
 
 interface StoredObject {
 	content: Buffer;
@@ -90,9 +91,7 @@ export class FakeStorage implements StorageDriver {
 	): Promise<void> {
 		const chunks: Buffer[] = [];
 		for await (const chunk of readable) {
-			chunks.push(
-				Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string),
-			);
+			chunks.push(toBuffer(chunk));
 		}
 		const buf = Buffer.concat(chunks);
 		this.#store.set(filePath, {

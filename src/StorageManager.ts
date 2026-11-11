@@ -467,7 +467,7 @@ export class LocalDriver implements StorageDriver {
 				}
 				return full;
 			} catch (err) {
-				if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+				if (errnoCode(err) !== "ENOENT") throw err;
 				const parent = path.dirname(probe);
 				// The root itself is canonicalised at construction, so the walk
 				// always terminates at something that resolves.
@@ -562,7 +562,7 @@ export class LocalDriver implements StorageDriver {
 		} catch (err) {
 			// One syscall instead of exists-then-read: the pair also answered
 			// `null` for a file that was deleted between the two.
-			if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+			if (errnoCode(err) === "ENOENT") return null;
 			throw err;
 		}
 	}
@@ -577,7 +577,7 @@ export class LocalDriver implements StorageDriver {
 		try {
 			handle = await fsp.open(full, fs.constants.O_RDONLY | O_NOFOLLOW);
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+			if (errnoCode(err) === "ENOENT") {
 				throw new ArchiveError(
 					"E_ARCHIVE_NOT_FOUND",
 					`File does not exist at path '${filePath}'`,
@@ -595,7 +595,7 @@ export class LocalDriver implements StorageDriver {
 		try {
 			await fsp.unlink(full);
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+			if (errnoCode(err) === "ENOENT") return false;
 			throw err;
 		}
 		// Sidecar cleanup is best-effort. The main file is already gone
@@ -649,7 +649,7 @@ export class LocalDriver implements StorageDriver {
 		try {
 			stat = await fsp.stat(full);
 		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+			if (errnoCode(err) === "ENOENT") {
 				throw new ArchiveError(
 					"E_ARCHIVE_NOT_FOUND",
 					`File does not exist at path '${filePath}'`,
@@ -712,18 +712,18 @@ export class LocalDriver implements StorageDriver {
 		} catch (err) {
 			// Absent sidecar is the documented default, and it is the common
 			// case: one syscall answers both that and a real read failure.
-			if ((err as NodeJS.ErrnoException).code === "ENOENT") return "public";
+			if (errnoCode(err) === "ENOENT") return "public";
 			throw new ArchiveError(
 				"E_ARCHIVE_VISIBILITY_CORRUPT",
-				`Failed to read visibility sidecar for '${filePath}' (${(err as NodeJS.ErrnoException).code ?? "I/O error"}); refusing to default to 'public'.`,
+				`Failed to read visibility sidecar for '${filePath}' (${errnoCode(err) ?? "I/O error"}); refusing to default to 'public'.`,
 				{
 					hint: "Inspect the sidecar file or re-apply visibility via setVisibility().",
 				},
 			);
 		}
-		let parsed: { visibility?: unknown };
+		let parsed: unknown;
 		try {
-			parsed = JSON.parse(raw) as { visibility?: unknown };
+			parsed = JSON.parse(raw);
 		} catch {
 			throw new ArchiveError(
 				"E_ARCHIVE_VISIBILITY_CORRUPT",
@@ -741,12 +741,16 @@ export class LocalDriver implements StorageDriver {
 		// handed out `/storage/<path>` instead of a signed URL. The doc comment
 		// above already promised this for unparseable JSON; a JSON document
 		// that parses and says nothing usable is the same situation.
-		if (parsed.visibility === "private" || parsed.visibility === "public") {
-			return parsed.visibility;
+		const visibility =
+			typeof parsed === "object" && parsed !== null && "visibility" in parsed
+				? parsed.visibility
+				: undefined;
+		if (visibility === "private" || visibility === "public") {
+			return visibility;
 		}
 		throw new ArchiveError(
 			"E_ARCHIVE_VISIBILITY_CORRUPT",
-			`Sidecar for '${filePath}' carries no usable visibility (${JSON.stringify(parsed.visibility)}); refusing to default to 'public'.`,
+			`Sidecar for '${filePath}' carries no usable visibility (${JSON.stringify(visibility)}); refusing to default to 'public'.`,
 			{
 				hint: "Delete the sidecar file and re-apply visibility via setVisibility().",
 			},
@@ -861,7 +865,7 @@ export class LocalDriver implements StorageDriver {
 			await fsp.rename(fromFull, toFull);
 		} catch (err) {
 			// Cross-device rename — fall back to copy+unlink.
-			if ((err as NodeJS.ErrnoException).code === "EXDEV") {
+			if (errnoCode(err) === "EXDEV") {
 				await fsp.copyFile(fromFull, toFull);
 				await fsp.unlink(fromFull);
 			} else {
@@ -882,7 +886,7 @@ export class LocalDriver implements StorageDriver {
 			} catch (err) {
 				throw new ArchiveError(
 					"E_ARCHIVE_VISIBILITY_MOVE_FAILED",
-					`move('${from}' -> '${to}'): main file moved but visibility sidecar write failed (${(err as NodeJS.ErrnoException).code ?? "unknown"}). Target visibility is undefined.`,
+					`move('${from}' -> '${to}'): main file moved but visibility sidecar write failed (${errnoCode(err) ?? "unknown"}). Target visibility is undefined.`,
 					{
 						hint: "Re-apply visibility via setVisibility() on the target path.",
 					},
