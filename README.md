@@ -39,6 +39,16 @@ import { createSignedRouteHandler } from '@c9up/archive/signed-route'
 const handler = createSignedRouteHandler({ storage, driver })
 ```
 
+A refused request gets a JSON body `{ error: { code, message } }`:
+
+| Status | Code | When |
+| --- | --- | --- |
+| 403 | `E_ARCHIVE_INVALID_SIGNATURE` | The signature, its expiry or a signed header override is malformed or does not match |
+| 403 | `E_ARCHIVE_EXPIRED_SIGNATURE` | The signature is valid but its `exp` has passed |
+| 403 | `E_ARCHIVE_ACCESS_DENIED` | An unsigned request for a private file |
+| 403 | `E_ARCHIVE_INVALID_KEY` | The path names no key the disk will address |
+| 404 | `E_ARCHIVE_NOT_FOUND` | A valid signature for a file that is not stored |
+
 ## Entry points
 
 - `@c9up/archive` — main API

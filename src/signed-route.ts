@@ -3,7 +3,9 @@
  *
  * Verifies the HMAC produced by {@link LocalDriver.getSignedUrl} and,
  * on success, serves the file from the driver. Tampered signatures →
- * 403 `E_INVALID_SIGNATURE`. Expired `exp` → 403 `E_EXPIRED_SIGNATURE`.
+ * 403 `E_ARCHIVE_INVALID_SIGNATURE`. Expired `exp` → 403
+ * `E_ARCHIVE_EXPIRED_SIGNATURE`. A valid signature for a file that is not
+ * stored → 404 `E_ARCHIVE_NOT_FOUND`.
  * No signature at all → the file's visibility decides: a public file is
  * served, a private one refused with 403 `E_ARCHIVE_ACCESS_DENIED`, and a
  * name that is not stored falls through to `next()`.
@@ -133,7 +135,10 @@ export function createSignedRouteHandler(
 			decoded = decodeSegments(encodedPath);
 		} catch {
 			ctx.response.status(403).json({
-				error: { code: "E_INVALID_SIGNATURE", message: "Malformed path" },
+				error: {
+					code: "E_ARCHIVE_INVALID_SIGNATURE",
+					message: "Malformed path",
+				},
 			});
 			return;
 		}
@@ -194,7 +199,7 @@ export function createSignedRouteHandler(
 			// downgraded to the unsigned path.
 			ctx.response.status(403).json({
 				error: {
-					code: "E_INVALID_SIGNATURE",
+					code: "E_ARCHIVE_INVALID_SIGNATURE",
 					message: "Malformed signature",
 				},
 			});
@@ -208,7 +213,7 @@ export function createSignedRouteHandler(
 		if (!/^[a-f0-9]{64}$/.test(sigHex)) {
 			ctx.response.status(403).json({
 				error: {
-					code: "E_INVALID_SIGNATURE",
+					code: "E_ARCHIVE_INVALID_SIGNATURE",
 					message: "Malformed signature",
 				},
 			});
@@ -221,7 +226,10 @@ export function createSignedRouteHandler(
 		const exp = Number.parseInt(expRaw, 10);
 		if (!/^\d+$/.test(expRaw) || !Number.isFinite(exp)) {
 			ctx.response.status(403).json({
-				error: { code: "E_INVALID_SIGNATURE", message: "Malformed expiry" },
+				error: {
+					code: "E_ARCHIVE_INVALID_SIGNATURE",
+					message: "Malformed expiry",
+				},
 			});
 			return;
 		}
@@ -236,7 +244,7 @@ export function createSignedRouteHandler(
 			if (typeof raw !== "string" || !isHeaderValue(raw)) {
 				ctx.response.status(403).json({
 					error: {
-						code: "E_INVALID_SIGNATURE",
+						code: "E_ARCHIVE_INVALID_SIGNATURE",
 						message: "Malformed header override",
 					},
 				});
@@ -256,14 +264,20 @@ export function createSignedRouteHandler(
 		const provided = Buffer.from(sigHex, "hex");
 		if (!timingSafeEqual(provided, expected)) {
 			ctx.response.status(403).json({
-				error: { code: "E_INVALID_SIGNATURE", message: "Invalid signature" },
+				error: {
+					code: "E_ARCHIVE_INVALID_SIGNATURE",
+					message: "Invalid signature",
+				},
 			});
 			return;
 		}
 
 		if (exp * 1000 <= Date.now()) {
 			ctx.response.status(403).json({
-				error: { code: "E_EXPIRED_SIGNATURE", message: "Signed URL expired" },
+				error: {
+					code: "E_ARCHIVE_EXPIRED_SIGNATURE",
+					message: "Signed URL expired",
+				},
 			});
 			return;
 		}
@@ -331,9 +345,9 @@ function isNotFound(err: unknown): boolean {
 }
 
 function notFound(ctx: SignedRouteHttpContext): void {
-	ctx.response
-		.status(404)
-		.json({ error: { code: "E_NOT_FOUND", message: "File not found" } });
+	ctx.response.status(404).json({
+		error: { code: "E_ARCHIVE_NOT_FOUND", message: "File not found" },
+	});
 }
 
 function isKeyError(err: unknown): boolean {

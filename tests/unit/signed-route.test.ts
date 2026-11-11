@@ -69,6 +69,19 @@ function buildCtx(
 	};
 }
 
+/** The `error.code` of the first JSON body the route sent, if any. */
+function errorCode(json: ReturnType<typeof vi.fn<(data: unknown) => void>>) {
+	const body: unknown = json.mock.calls[0]?.[0];
+	if (typeof body !== "object" || body === null || !("error" in body)) {
+		return undefined;
+	}
+	const { error } = body;
+	if (typeof error !== "object" || error === null || !("code" in error)) {
+		return undefined;
+	}
+	return error.code;
+}
+
 describe("createSignedRouteHandler", () => {
 	let root: string;
 	let driver: LocalDriver;
@@ -102,7 +115,7 @@ describe("createSignedRouteHandler", () => {
 		expect(response.header).toHaveBeenCalledWith("Content-Type", "text/plain");
 	});
 
-	it("returns 403 E_INVALID_SIGNATURE when a single char in sig is flipped", async () => {
+	it("returns 403 E_ARCHIVE_INVALID_SIGNATURE when a single char in sig is flipped", async () => {
 		await driver.put("cat.txt", "hello");
 		const url = driver.getSignedUrl("cat.txt");
 		const tampered = url.replace(/&sig=([a-f0-9])/, (_, first) => {
@@ -112,13 +125,10 @@ describe("createSignedRouteHandler", () => {
 		const { ctx, response } = buildCtx("GET", tampered);
 		await middleware(ctx, vi.fn());
 		expect(response.status).toHaveBeenCalledWith(403);
-		const call = response.json.mock.calls[0]?.[0] as {
-			error: { code: string };
-		};
-		expect(call.error.code).toBe("E_INVALID_SIGNATURE");
+		expect(errorCode(response.json)).toBe("E_ARCHIVE_INVALID_SIGNATURE");
 	});
 
-	it("returns 403 E_INVALID_SIGNATURE on a truncated signature (length mismatch)", async () => {
+	it("returns 403 E_ARCHIVE_INVALID_SIGNATURE on a truncated signature (length mismatch)", async () => {
 		await driver.put("cat.txt", "hello");
 		const url = driver.getSignedUrl("cat.txt");
 		const truncated = url.replace(/&sig=[a-f0-9]+$/, "&sig=abc");
@@ -127,7 +137,7 @@ describe("createSignedRouteHandler", () => {
 		expect(response.status).toHaveBeenCalledWith(403);
 	});
 
-	it("returns 403 E_EXPIRED_SIGNATURE when exp is in the past", async () => {
+	it("returns 403 E_ARCHIVE_EXPIRED_SIGNATURE when exp is in the past", async () => {
 		await driver.put("cat.txt", "hello");
 		// Build an expired URL by hand (exp in the past) — sign manually.
 		const { createHmac } = await import("node:crypto");
@@ -139,13 +149,10 @@ describe("createSignedRouteHandler", () => {
 		const { ctx, response } = buildCtx("GET", url);
 		await middleware(ctx, vi.fn());
 		expect(response.status).toHaveBeenCalledWith(403);
-		const call = response.json.mock.calls[0]?.[0] as {
-			error: { code: string };
-		};
-		expect(call.error.code).toBe("E_EXPIRED_SIGNATURE");
+		expect(errorCode(response.json)).toBe("E_ARCHIVE_EXPIRED_SIGNATURE");
 	});
 
-	it("returns E_INVALID_SIGNATURE (not E_EXPIRED_SIGNATURE) when an invalid sig accompanies an expired exp", async () => {
+	it("returns E_ARCHIVE_INVALID_SIGNATURE (not E_ARCHIVE_EXPIRED_SIGNATURE) when an invalid sig accompanies an expired exp", async () => {
 		// HMAC verification must run BEFORE the expiry check so an
 		// attacker cannot distinguish "valid sig, expired URL" from
 		// "invalid sig, fresh URL" via response timing or error code.
@@ -156,10 +163,7 @@ describe("createSignedRouteHandler", () => {
 		const { ctx, response } = buildCtx("GET", url);
 		await middleware(ctx, vi.fn());
 		expect(response.status).toHaveBeenCalledWith(403);
-		const call = response.json.mock.calls[0]?.[0] as {
-			error: { code: string };
-		};
-		expect(call.error.code).toBe("E_INVALID_SIGNATURE");
+		expect(errorCode(response.json)).toBe("E_ARCHIVE_INVALID_SIGNATURE");
 	});
 
 	it("rejects exp with trailing garbage (parseInt would silently truncate)", async () => {
@@ -173,10 +177,7 @@ describe("createSignedRouteHandler", () => {
 		const { ctx, response } = buildCtx("GET", aliased);
 		await middleware(ctx, vi.fn());
 		expect(response.status).toHaveBeenCalledWith(403);
-		const call = response.json.mock.calls[0]?.[0] as {
-			error: { code: string };
-		};
-		expect(call.error.code).toBe("E_INVALID_SIGNATURE");
+		expect(errorCode(response.json)).toBe("E_ARCHIVE_INVALID_SIGNATURE");
 	});
 
 	it("falls through to next() for an unsigned request naming no stored file", async () => {
@@ -278,11 +279,43 @@ describe("createSignedRouteHandler", () => {
 		expect(response.status).toHaveBeenCalledWith(403);
 	});
 
-	it("returns 404 E_NOT_FOUND when the signature is valid but the file is missing", async () => {
+	it("returns 404 E_ARCHIVE_NOT_FOUND when the signature is valid but the file is missing", async () => {
 		const url = driver.getSignedUrl("missing.txt");
 		const { ctx, response } = buildCtx("GET", url);
 		await middleware(ctx, vi.fn());
 		expect(response.status).toHaveBeenCalledWith(404);
+		expect(errorCode(response.json)).toBe("E_ARCHIVE_NOT_FOUND");
+	});
+
+	it("answers every refusal with a code in the package's namespace", async () => {
+		await driver.put("cat.txt", "hello");
+		const url = driver.getSignedUrl("cat.txt");
+		const exp = /exp=(\d+)/.exec(url)?.[1] ?? "";
+		const sig = /sig=([a-f0-9]+)/.exec(url)?.[1] ?? "";
+		const flipped = `${sig[0] === "a" ? "b" : "a"}${sig.slice(1)}`;
+		const cases: Array<[string, string]> = [
+			["/storage/%E0%A4%A.txt?exp=1&sig=0", "E_ARCHIVE_INVALID_SIGNATURE"],
+			[`/storage/cat.txt?exp=${exp}`, "E_ARCHIVE_INVALID_SIGNATURE"],
+			[`/storage/cat.txt?exp=${exp}&sig=abc`, "E_ARCHIVE_INVALID_SIGNATURE"],
+			[
+				`/storage/cat.txt?exp=${exp}xyz&sig=${sig}`,
+				"E_ARCHIVE_INVALID_SIGNATURE",
+			],
+			[
+				`${url}&contentDisposition=${encodeURIComponent("a\u0001b")}`,
+				"E_ARCHIVE_INVALID_SIGNATURE",
+			],
+			[
+				`/storage/cat.txt?exp=${exp}&sig=${flipped}`,
+				"E_ARCHIVE_INVALID_SIGNATURE",
+			],
+		];
+		for (const [target, code] of cases) {
+			const { ctx, response } = buildCtx("GET", target);
+			await middleware(ctx, vi.fn());
+			expect(response.status, target).toHaveBeenCalledWith(403);
+			expect(errorCode(response.json), target).toBe(code);
+		}
 	});
 
 	it("falls through to next() for non-GET methods", async () => {
