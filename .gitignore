@@ -8,5 +8,5 @@ coverage/
 .DS_Store
 *.log
 .turbo/
-# Workstream: local app state, never committed
-.workstream/.local/
+# Workstream: the maintainer's local tracking, never published
+.workstream/
