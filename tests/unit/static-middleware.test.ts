@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,11 +22,21 @@ function makeCtx(
 	const statusSpy = vi.fn<(code: number) => StaticMiddlewareResponse>();
 	const headerSpy =
 		vi.fn<(name: string, value: string) => StaticMiddlewareResponse>();
-	const sendBufferSpy = vi.fn<(buf: Buffer) => void>();
+	// The body each `stream()` call carried, drained as a client would.
+	const bodies: Buffer[] = [];
+	const streamSpy = vi.fn<(body: NodeJS.ReadableStream) => Promise<void>>(
+		async (body) => {
+			const chunks: Buffer[] = [];
+			for await (const chunk of body) {
+				chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+			}
+			bodies.push(Buffer.concat(chunks));
+		},
+	);
 	const response: StaticMiddlewareResponse = {
 		status: statusSpy,
 		header: headerSpy,
-		sendBuffer: sendBufferSpy,
+		stream: streamSpy,
 	};
 	// Fluent chain: status()/header() return the response itself.
 	statusSpy.mockReturnValue(response);
@@ -39,10 +50,11 @@ function makeCtx(
 	const ctx: StaticMiddlewareHttpContext = { request, response };
 	return {
 		ctx,
+		bodies,
 		response: {
 			status: statusSpy,
 			header: headerSpy,
-			sendBuffer: sendBufferSpy,
+			stream: streamSpy,
 		},
 	};
 }
@@ -77,7 +89,7 @@ describe("StaticMiddleware", () => {
 			// at — and the read now refuses to follow a link at open time, so a
 			// link swapped in after the check cannot be served either.
 			expect(next).toHaveBeenCalled();
-			expect(response.sendBuffer).not.toHaveBeenCalled();
+			expect(response.stream).not.toHaveBeenCalled();
 		} finally {
 			fs.rmSync(outside, { recursive: true, force: true });
 		}
@@ -100,7 +112,60 @@ describe("StaticMiddleware", () => {
 			response.header.mock.calls.some((call: unknown[]) => call[0] === "ETag"),
 		).toBe(true);
 		expect(response.status).toHaveBeenCalledWith(200);
-		expect(response.sendBuffer).toHaveBeenCalledTimes(1);
+		expect(response.stream).toHaveBeenCalledTimes(1);
+	});
+
+	it("streams a file in bounded chunks instead of reading it whole", async () => {
+		// A buffered read held one full copy of the file per request until the
+		// response flushed: 20 concurrent requests for a 500 MB video held 10 GB,
+		// and a file past Node's 2 GiB read cap was never served at all.
+		const content = Buffer.alloc(1024 * 1024 + 7, 0x61);
+		fs.writeFileSync(path.join(root, "video.mp4"), content);
+		const probe = await fs.promises.open(path.join(root, "video.mp4"));
+		const fileHandle: FileHandle = Object.getPrototypeOf(probe);
+		await probe.close();
+		const readWhole = vi.spyOn(fileHandle, "readFile");
+
+		const chunkSizes: number[] = [];
+		const received: Buffer[] = [];
+		const response: StaticMiddlewareResponse = {
+			status: () => response,
+			header: () => response,
+			stream: async (body) => {
+				for await (const chunk of body) {
+					const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+					chunkSizes.push(bytes.length);
+					received.push(bytes);
+				}
+			},
+		};
+		const request = {
+			method: () => "GET",
+			path: () => "/static/video.mp4",
+			header: () => undefined,
+		};
+		const next = vi.fn<() => Promise<void>>(async () => {});
+
+		await middleware.handle({ request, response }, next);
+
+		expect(next).not.toHaveBeenCalled();
+		expect(readWhole).not.toHaveBeenCalled();
+		expect(Buffer.concat(received).equals(content)).toBe(true);
+		expect(chunkSizes.length).toBeGreaterThan(1);
+		expect(Math.max(...chunkSizes)).toBeLessThanOrEqual(64 * 1024);
+		readWhole.mockRestore();
+	});
+
+	it("serves an empty file as an empty body", async () => {
+		fs.writeFileSync(path.join(root, "empty.txt"), "");
+		const { ctx, bodies, response } = makeCtx("GET", "/static/empty.txt");
+		const next = vi.fn<() => Promise<void>>(async () => {});
+
+		await middleware.handle(ctx, next);
+
+		expect(next).not.toHaveBeenCalled();
+		expect(response.header).toHaveBeenCalledWith("Content-Length", "0");
+		expect(bodies).toEqual([Buffer.alloc(0)]);
 	});
 
 	/**
@@ -161,7 +226,7 @@ describe("StaticMiddleware", () => {
 		await middleware.handle(ctx, next);
 
 		expect(next).toHaveBeenCalledTimes(1);
-		expect(response.sendBuffer).not.toHaveBeenCalled();
+		expect(response.stream).not.toHaveBeenCalled();
 	});
 
 	it("returns 304 when If-None-Match matches the current ETag", async () => {
@@ -181,7 +246,7 @@ describe("StaticMiddleware", () => {
 		});
 		await middleware.handle(ctx, vi.fn());
 		expect(response.status).toHaveBeenCalledWith(304);
-		expect(response.sendBuffer).not.toHaveBeenCalled();
+		expect(response.stream).not.toHaveBeenCalled();
 	});
 
 	it("sends a quoted, weak ETag and matches a list weakly", async () => {
@@ -204,7 +269,7 @@ describe("StaticMiddleware", () => {
 		});
 		await middleware.handle(ctx, vi.fn());
 		expect(response.status).toHaveBeenCalledWith(304);
-		expect(response.sendBuffer).not.toHaveBeenCalled();
+		expect(response.stream).not.toHaveBeenCalled();
 	});
 
 	it("answers 304 for If-None-Match: *", async () => {
@@ -214,7 +279,7 @@ describe("StaticMiddleware", () => {
 		});
 		await middleware.handle(ctx, vi.fn());
 		expect(response.status).toHaveBeenCalledWith(304);
-		expect(response.sendBuffer).not.toHaveBeenCalled();
+		expect(response.stream).not.toHaveBeenCalled();
 	});
 
 	it("falls through when the URL prefix does not match (prefix-sibling safety)", async () => {
@@ -246,7 +311,7 @@ describe("StaticMiddleware", () => {
 		await middleware.handle(ctx, next);
 
 		expect(next).toHaveBeenCalledTimes(1);
-		expect(response.sendBuffer).not.toHaveBeenCalled();
+		expect(response.stream).not.toHaveBeenCalled();
 
 		fs.rmSync(outside, { recursive: true, force: true });
 	});
@@ -257,7 +322,7 @@ describe("StaticMiddleware", () => {
 		const next = vi.fn<() => Promise<void>>(async () => {});
 		await middleware.handle(ctx, next);
 		expect(next).toHaveBeenCalledTimes(1);
-		expect(response.sendBuffer).not.toHaveBeenCalled();
+		expect(response.stream).not.toHaveBeenCalled();
 	});
 
 	it("never serves a file its visibility marker does not declare public", async () => {
@@ -282,7 +347,7 @@ describe("StaticMiddleware", () => {
 			const { ctx, response } = makeCtx("GET", `/static/${name}`);
 			const next = vi.fn<() => Promise<void>>(async () => {});
 			await middleware.handle(ctx, next);
-			return { served: response.sendBuffer.mock.calls.length > 0, next };
+			return { served: response.stream.mock.calls.length > 0, next };
 		};
 		for (const name of ["private.txt", "corrupt.txt", "unknown.txt"]) {
 			const { served, next } = await serve(name);
@@ -307,7 +372,7 @@ describe("StaticMiddleware", () => {
 		const next = vi.fn<() => Promise<void>>(async () => {});
 		await middleware.handle(ctx, next);
 		expect(next).toHaveBeenCalledTimes(1);
-		expect(response.sendBuffer).not.toHaveBeenCalled();
+		expect(response.stream).not.toHaveBeenCalled();
 	});
 });
 
@@ -325,10 +390,10 @@ describe("StaticMiddleware > percent-encoded paths", () => {
 	});
 
 	const request = async (target: string) => {
-		const { ctx, response } = makeCtx("GET", target);
+		const { ctx, bodies } = makeCtx("GET", target);
 		const next = vi.fn<() => Promise<void>>(async () => {});
 		await middleware.handle(ctx, next);
-		const sent = response.sendBuffer.mock.calls[0]?.[0];
+		const sent = bodies[0];
 		return { sent: sent?.toString(), next };
 	};
 

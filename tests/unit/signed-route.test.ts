@@ -251,11 +251,11 @@ describe("createSignedRouteHandler", () => {
 			extensions: [".pdf"],
 		});
 		const { ctx, response } = buildCtx("GET", "/storage/secret.pdf");
-		const staticSend = vi.fn<(buf: Buffer) => void>();
+		const staticSend = vi.fn<(body: NodeJS.ReadableStream) => void>();
 		const staticResponse: StaticMiddlewareResponse = {
 			status: () => staticResponse,
 			header: () => staticResponse,
-			sendBuffer: staticSend,
+			stream: staticSend,
 		};
 		await middleware(ctx, () =>
 			statics.handle(

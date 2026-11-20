@@ -13,6 +13,7 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { Readable } from "node:stream";
 import { matchesIfNoneMatch, statTag } from "./etag.js";
 import { DEFAULT_EXTENSIONS, inferMimeType } from "./mime-types.js";
 import { VISIBILITY_SIDECAR_SUFFIX } from "./StorageManager.js";
@@ -26,7 +27,11 @@ import { VISIBILITY_SIDECAR_SUFFIX } from "./StorageManager.js";
 export interface StaticMiddlewareResponse {
 	status(code: number): StaticMiddlewareResponse;
 	header(name: string, value: string): StaticMiddlewareResponse;
-	sendBuffer(buf: Buffer): void;
+	/**
+	 * Send a readable as the body. The framework's response streams it to
+	 * the client, so a request never holds the whole file in memory.
+	 */
+	stream(body: NodeJS.ReadableStream): Promise<void> | void;
 }
 
 export interface StaticMiddlewareHttpContext {
@@ -142,6 +147,19 @@ function isErrnoCode(err: unknown, code: string): boolean {
 		"code" in err &&
 		err.code === code
 	);
+}
+
+/**
+ * The first `size` bytes of an open file, as a stream that owns the
+ * descriptor. An empty file gets an empty stream (a read range cannot end
+ * before it starts), and its descriptor is closed here.
+ */
+function bodyOf(handle: fsp.FileHandle, size: number): NodeJS.ReadableStream {
+	if (size === 0) {
+		void handle.close().catch(() => {});
+		return Readable.from([]);
+	}
+	return handle.createReadStream({ start: 0, end: size - 1 });
 }
 
 export class StaticMiddleware {
@@ -286,22 +304,23 @@ export class StaticMiddleware {
 		//
 		// A parent directory swapped in the same window is not covered; that
 		// needs openat-relative-to-a-descriptor, which Node does not expose.
-		let content: Buffer;
+		let handle: fsp.FileHandle;
 		try {
-			const handle = await fsp.open(
+			handle = await fsp.open(
 				realPath,
 				fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
 			);
-			try {
-				content = await handle.readFile();
-			} finally {
-				await handle.close();
-			}
 		} catch {
 			return next();
 		}
-		// Send the raw Buffer — NOT content.toString() which would destroy binary
-		// data (PNG, PDF, ZIP, etc.) by interpreting it as UTF-8.
-		ctx.response.status(200).sendBuffer(content);
+		// Streamed from the descriptor, never read whole: a buffered read held
+		// one full copy of the file per request until the response flushed, and
+		// a file past Node's 2 GiB read cap could not be served at all. The
+		// stream owns the descriptor and closes it when it ends, fails or is
+		// abandoned by a client that left. It stops at the size the
+		// Content-Length announced, so a file that grows meanwhile cannot
+		// overrun it.
+		ctx.response.status(200);
+		await ctx.response.stream(bodyOf(handle, stat.size));
 	}
 }
