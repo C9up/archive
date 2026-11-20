@@ -96,13 +96,29 @@ export const services: {
 	},
 };
 
+/**
+ * The factory configured for a disk, or `undefined` when there is none. Only
+ * OWN entries of `services` are disks: a plain lookup would answer
+ * `constructor`, `toString` or `hasOwnProperty` with the function inherited
+ * from `Object.prototype` and build a broken disk out of it.
+ *
+ * NAMED DEVIATION (stricter than flydrive's `DriveManager.use`, which reads
+ * `services[name]` directly): an inherited name is an unknown disk.
+ */
+function serviceFactory(
+	services: Record<string, DriveServiceFactory>,
+	name: string,
+): DriveServiceFactory | undefined {
+	return Object.hasOwn(services, name) ? services[name] : undefined;
+}
+
 export class DriveManager {
 	#config: DriveConfig;
 	#cache = new Map<string, StorageManager>();
 	#fakes = new Map<string, FakeStorageManager>();
 
 	constructor(config: DriveConfig) {
-		if (config.services[config.default] === undefined) {
+		if (serviceFactory(config.services, config.default) === undefined) {
 			throw new ArchiveError(
 				"E_ARCHIVE_UNKNOWN_DISK",
 				`Archive default disk '${config.default}' is not present in config.services`,
@@ -125,7 +141,7 @@ export class DriveManager {
 		if (fake) return fake;
 		const cached = this.#cache.get(name);
 		if (cached) return cached;
-		const factory = this.#config.services[name];
+		const factory = serviceFactory(this.#config.services, name);
 		if (factory === undefined) {
 			throw new ArchiveError(
 				"E_ARCHIVE_UNKNOWN_DISK",

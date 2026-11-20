@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DriveManager, services } from "../../src/DriveManager.js";
+import { ArchiveError } from "../../src/errors.js";
 import {
 	FakeStorage,
 	FakeStorageManager,
@@ -209,6 +210,17 @@ describe("archive > the fake behind a manager", () => {
 	});
 });
 
+/** The ArchiveError code `run` throws, or `undefined` when it does not throw one. */
+function unknownDiskCode(run: () => unknown): string | undefined {
+	try {
+		run();
+	} catch (error) {
+		if (error instanceof ArchiveError) return error.code;
+		throw error;
+	}
+	return undefined;
+}
+
 describe("archive > choosing a disk", () => {
 	const config = () => ({
 		default: "local" as const,
@@ -239,6 +251,36 @@ describe("archive > choosing a disk", () => {
 			// The list is what turns a typo into a one-second fix.
 			expect(archive.hint).toContain("local, backup");
 		}
+	});
+
+	it("does not take a name inherited from Object.prototype for a disk", () => {
+		// `services.constructor` is `Object`: called as a factory it returned
+		// `{}`, which was wrapped, cached, and failed on the first `put` with
+		// a bare TypeError far from the cause.
+		const manager = new DriveManager(config());
+		for (const name of [
+			"constructor",
+			"toString",
+			"valueOf",
+			"hasOwnProperty",
+			"__proto__",
+		]) {
+			expect(unknownDiskCode(() => manager.use(name))).toBe(
+				"E_ARCHIVE_UNKNOWN_DISK",
+			);
+		}
+	});
+
+	it("refuses an inherited name as the default disk at construction", () => {
+		expect(
+			unknownDiskCode(
+				() =>
+					new DriveManager({
+						default: "constructor",
+						services: { local: services.fs() },
+					}),
+			),
+		).toBe("E_ARCHIVE_UNKNOWN_DISK");
 	});
 
 	it("resolves the declared default, and caches each disk", () => {
