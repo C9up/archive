@@ -492,8 +492,88 @@ export class LocalDriver implements StorageDriver {
 		// by name follows it — the check passed on one object and the write
 		// landed on another. Refusing to follow a link at open time takes the
 		// swap off the table: the open fails instead of writing outside the root.
+		//
+		// Only `visibility` has a filesystem-equivalent (the marker);
+		// contentType/cacheControl/... have no local meaning.
+		await this.#writeMarked(full, options?.visibility, async () => {
+			const handle = await fsp.open(
+				full,
+				fs.constants.O_WRONLY |
+					fs.constants.O_CREAT |
+					fs.constants.O_TRUNC |
+					O_NOFOLLOW,
+				0o666,
+			);
+			try {
+				await handle.writeFile(content);
+			} finally {
+				await handle.close();
+			}
+		});
+	}
+
+	/**
+	 * Run `write`, which puts data at `full`, and leave the object with
+	 * `visibility` — without it ever being readable as public while it should
+	 * not be.
+	 *
+	 * The marker is a second file, and its absence means public. A PRIVATE
+	 * marker therefore goes down BEFORE the data: written after, the object
+	 * was public for the whole write — served unsigned by the signed route and
+	 * by a static server over the disk — and stayed public for good when the
+	 * marker write failed. If the data write then fails, the half-written
+	 * object is removed, and its marker only once the data is gone: the object
+	 * ends private or absent, never public.
+	 *
+	 * A PUBLIC marker goes down AFTER the data, for the same reason the other
+	 * way round: the bytes being replaced may be private, and they keep their
+	 * marker until the new ones have landed.
+	 */
+	async #writeMarked(
+		full: string,
+		visibility: Visibility | undefined,
+		write: () => Promise<void>,
+	): Promise<void> {
+		if (visibility !== "private") {
+			await write();
+			if (visibility !== undefined) await this.#writeMarker(full, visibility);
+			return;
+		}
+		await this.#markPrivate(full);
+		try {
+			await write();
+		} catch (err) {
+			await discardPrivate(full);
+			throw err;
+		}
+	}
+
+	/**
+	 * Mark `full` private before its data is touched. A marker write that
+	 * fails puts the previous marker back (or leaves a damaged one, which
+	 * reads as undetermined and is served to nobody), and rethrows: the
+	 * caller writes no data.
+	 */
+	async #markPrivate(full: string): Promise<MarkerSnapshot> {
+		const previous = await markerSnapshot(full);
+		try {
+			await this.#writeMarker(full, "private");
+		} catch (err) {
+			await restoreMarker(full, previous);
+			throw err;
+		}
+		return previous;
+	}
+
+	/**
+	 * Write the visibility marker of the file at `full`, a path `#safePath`
+	 * already resolved. Through an O_NOFOLLOW descriptor, as the data is: a
+	 * link planted at the marker's name is refused rather than followed to
+	 * write outside the root.
+	 */
+	async #writeMarker(full: string, visibility: Visibility): Promise<void> {
 		const handle = await fsp.open(
-			full,
+			full + VISIBILITY_SIDECAR_SUFFIX,
 			fs.constants.O_WRONLY |
 				fs.constants.O_CREAT |
 				fs.constants.O_TRUNC |
@@ -501,14 +581,9 @@ export class LocalDriver implements StorageDriver {
 			0o666,
 		);
 		try {
-			await handle.writeFile(content);
+			await handle.writeFile(JSON.stringify({ visibility }));
 		} finally {
 			await handle.close();
-		}
-		// Only `visibility` has a filesystem-equivalent (the sidecar).
-		// contentType/cacheControl/... have no local meaning.
-		if (options?.visibility !== undefined) {
-			await this.setVisibility(filePath, options.visibility);
 		}
 	}
 
@@ -690,8 +765,7 @@ export class LocalDriver implements StorageDriver {
 				{ hint: "put() the file before calling setVisibility()." },
 			);
 		}
-		const sidecar = full + VISIBILITY_SIDECAR_SUFFIX;
-		await fsp.writeFile(sidecar, JSON.stringify({ visibility }), { flag: "w" });
+		await this.#writeMarker(full, visibility);
 	}
 
 	/**
@@ -830,12 +904,12 @@ export class LocalDriver implements StorageDriver {
 			);
 		}
 		await fsp.mkdir(path.dirname(toFull), { recursive: true });
-		await fsp.copyFile(fromFull, toFull);
 		// Intentionally do NOT copy the visibility sidecar — new object
-		// takes default visibility unless the caller asks otherwise.
-		if (options?.visibility !== undefined) {
-			await this.setVisibility(to, options.visibility);
-		}
+		// takes default visibility unless the caller asks otherwise. A private
+		// one is marked before the bytes are copied, as put() does.
+		await this.#writeMarked(toFull, options?.visibility, () =>
+			fsp.copyFile(fromFull, toFull),
+		);
 	}
 
 	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
@@ -854,35 +928,43 @@ export class LocalDriver implements StorageDriver {
 		// silently downgrade private→public. `#readVisibility` throws on
 		// corruption, which surfaces here BEFORE we mutate anything.
 		const fromSidecar = fromFull + VISIBILITY_SIDECAR_SUFFIX;
-		const toSidecar = toFull + VISIBILITY_SIDECAR_SUFFIX;
 		const capturedVisibility: Visibility | undefined = (await exists(
 			fromSidecar,
 		))
 			? await this.#readVisibility(from)
 			: undefined;
+		// An explicit visibility override wins over the preserved value.
+		const target = options?.visibility ?? capturedVisibility;
 		await fsp.mkdir(path.dirname(toFull), { recursive: true });
+		// A private target is marked BEFORE the file arrives: renamed first, the
+		// moved private file sat at the target with no marker — public — until
+		// the second write, and for good when that write failed.
+		const previous =
+			target === "private" ? await this.#markPrivate(toFull) : undefined;
 		try {
 			await fsp.rename(fromFull, toFull);
 		} catch (err) {
-			// Cross-device rename — fall back to copy+unlink.
-			if (errnoCode(err) === "EXDEV") {
-				await fsp.copyFile(fromFull, toFull);
-				await fsp.unlink(fromFull);
-			} else {
+			if (errnoCode(err) !== "EXDEV") {
+				// Nothing moved: the target is what it was, so is its marker.
+				if (previous !== undefined) await restoreMarker(toFull, previous);
 				throw err;
 			}
-		}
-		// Visibility carries forward by re-writing the new sidecar from
-		// captured data — atomic relative to the rename, immune to the
-		// EXDEV/perm failure modes that plagued the rename-the-sidecar path.
-		// Public is the default, so an absent source sidecar means no work.
-		if (capturedVisibility !== undefined) {
+			// Cross-device rename — fall back to copy+unlink. A half-copied
+			// target is removed, and its marker only once the data is gone.
 			try {
-				await fsp.writeFile(
-					toSidecar,
-					JSON.stringify({ visibility: capturedVisibility }),
-					{ flag: "w" },
-				);
+				await fsp.copyFile(fromFull, toFull);
+			} catch (copyErr) {
+				await discardPrivate(toFull);
+				throw copyErr;
+			}
+			await fsp.unlink(fromFull);
+		}
+		// A public target is marked AFTER the move: until then, whatever was at
+		// the target keeps its own marker. Public is the default, so an absent
+		// source sidecar and no override mean no work.
+		if (target === "public") {
+			try {
+				await this.#writeMarker(toFull, target);
 			} catch (err) {
 				throw new ArchiveError(
 					"E_ARCHIVE_VISIBILITY_MOVE_FAILED",
@@ -892,6 +974,8 @@ export class LocalDriver implements StorageDriver {
 					},
 				);
 			}
+		}
+		if (capturedVisibility !== undefined) {
 			// Best-effort cleanup of the source sidecar — visibility is already
 			// preserved on the target side. A failure here leaves a stale
 			// sidecar pointing at the now-missing source file; benign.
@@ -900,10 +984,6 @@ export class LocalDriver implements StorageDriver {
 			} catch {
 				// benign — source dir may be cleaned up by later operations.
 			}
-		}
-		// An explicit visibility override wins over the preserved value.
-		if (options?.visibility !== undefined) {
-			await this.setVisibility(to, options.visibility);
 		}
 	}
 
@@ -1016,6 +1096,82 @@ export class LocalDriver implements StorageDriver {
 			const stat = await fsp.stat(full);
 			yield { path: rel, size: stat.size, lastModified: stat.mtime };
 		}
+	}
+}
+
+/**
+ * What a visibility marker held before a write replaced it, so a write that
+ * fails can put it back. `unknown` — a marker that could not be read, a link
+ * planted at its name — is never touched again.
+ */
+type MarkerSnapshot =
+	| { readonly state: "absent" }
+	| { readonly state: "present"; readonly bytes: Buffer }
+	| { readonly state: "unknown" };
+
+/** The marker of the file at `full` as it is now. */
+async function markerSnapshot(full: string): Promise<MarkerSnapshot> {
+	try {
+		const handle = await fsp.open(
+			full + VISIBILITY_SIDECAR_SUFFIX,
+			fs.constants.O_RDONLY | O_NOFOLLOW,
+		);
+		try {
+			return { state: "present", bytes: await handle.readFile() };
+		} finally {
+			await handle.close();
+		}
+	} catch (err) {
+		return errnoCode(err) === "ENOENT"
+			? { state: "absent" }
+			: { state: "unknown" };
+	}
+}
+
+/**
+ * Put back the marker `snapshot` recorded. Best-effort, never throws: it runs
+ * on a path that is already failing, and a restore that fails leaves the
+ * private marker (or a damaged one, read as undetermined) — closed either way.
+ */
+async function restoreMarker(
+	full: string,
+	snapshot: MarkerSnapshot,
+): Promise<void> {
+	const marker = full + VISIBILITY_SIDECAR_SUFFIX;
+	try {
+		if (snapshot.state === "absent") {
+			await fsp.unlink(marker);
+		} else if (snapshot.state === "present") {
+			const handle = await fsp.open(
+				marker,
+				fs.constants.O_WRONLY | fs.constants.O_TRUNC | O_NOFOLLOW,
+			);
+			try {
+				await handle.writeFile(snapshot.bytes);
+			} finally {
+				await handle.close();
+			}
+		}
+	} catch {
+		// Closed either way — see above.
+	}
+}
+
+/**
+ * Remove a private object whose data write failed half-way: the data first,
+ * then its marker — only once the data is gone, so the bytes are never left
+ * without the marker that keeps them private. Never throws.
+ */
+async function discardPrivate(full: string): Promise<void> {
+	try {
+		await fsp.unlink(full);
+	} catch (err) {
+		if (errnoCode(err) !== "ENOENT") return;
+	}
+	try {
+		await fsp.unlink(full + VISIBILITY_SIDECAR_SUFFIX);
+	} catch {
+		// An orphan marker serves nothing.
 	}
 }
 
