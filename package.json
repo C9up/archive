@@ -45,7 +45,7 @@
     "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.12",
+    "@biomejs/biome": "^2.6.8",
     "@c9up/helix": "^0.2.0",
     "@c9up/ream": "^0.2.30",
     "@types/node": "^22.20.1",
