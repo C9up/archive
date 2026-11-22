@@ -49,9 +49,9 @@
     "@c9up/helix": "^0.2.0",
     "@c9up/ream": "^0.2.30",
     "@types/node": "^22.20.1",
-    "@vitest/coverage-v8": "4.1.11",
+    "@vitest/coverage-v8": "4.1.12",
     "typescript": "^6.0.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   },
   "files": [
     "LICENSE",
