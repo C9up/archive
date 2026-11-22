@@ -510,21 +510,34 @@ function describeStoragePredicate(
 	return `, ${safeStringify(predicate)}`;
 }
 
-/** `JSON.stringify` with circular-ref + function-field handling.
- *  Functions render as `<function>`, circular refs as `<circular>`,
- *  unstringifiable values as `<unstringifiable>` — so an assertion
- *  failure message never gets eaten by a JSON throw. */
+/**
+ * `JSON.stringify` for an assertion message: a function renders as
+ * `<function>`, a BigInt as `<digits>n`, a cycle as `<circular>`, and a value
+ * that still cannot be written as `<unstringifiable>` — so a failure message
+ * is never eaten by a JSON throw.
+ *
+ * Only a cycle is cut. `path` holds the objects from the root to the value
+ * being written, so a value reached through two keys is written under both, as
+ * `JSON.stringify` writes it; remembering every object seen dropped the second
+ * one. The same rule as `@c9up/ream`'s `src/utils/safeStringify.ts`, kept as a
+ * local copy because this message format differs from a response body's.
+ */
 function safeStringify(value: unknown): string {
-	const seen = new WeakSet<object>();
+	const path: object[] = [];
 	try {
-		return JSON.stringify(value, (_key, v: unknown) => {
-			if (typeof v === "function") return "<function>";
-			if (typeof v === "object" && v !== null) {
-				if (seen.has(v)) return "<circular>";
-				seen.add(v);
-			}
-			return v;
-		});
+		const out: string | undefined = JSON.stringify(
+			value,
+			function replace(this: unknown, _key: string, v: unknown) {
+				if (typeof v === "function") return "<function>";
+				if (typeof v === "bigint") return `${v}n`;
+				if (typeof v !== "object" || v === null) return v;
+				while (path.length > 0 && path[path.length - 1] !== this) path.pop();
+				if (path.includes(v)) return "<circular>";
+				path.push(v);
+				return v;
+			},
+		);
+		return out ?? "undefined";
 	} catch {
 		return "<unstringifiable>";
 	}
