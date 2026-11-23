@@ -15,7 +15,12 @@
 
 import { createHash, createSign } from "node:crypto";
 import { Readable } from "node:stream";
-import { ArchiveError } from "./errors.js";
+import {
+	E_ARCHIVE_INVALID_DRIVER_CONFIG,
+	E_ARCHIVE_NOT_FOUND,
+	E_ARCHIVE_REMOTE_FAILED,
+	E_ARCHIVE_UNEXPECTED_RESPONSE,
+} from "./errors.js";
 import {
 	assertValidExpiry,
 	DEFAULT_EXPIRES_IN,
@@ -143,15 +148,17 @@ export class GcsDriver implements StorageDriver {
 
 	constructor(config: GcsConfig) {
 		if (!config.bucket) {
-			throw new Error("GcsDriver: `bucket` is required.");
+			throw new E_ARCHIVE_INVALID_DRIVER_CONFIG([
+				"GcsDriver: `bucket` is required.",
+			]);
 		}
 		if (
 			!config.serviceAccount?.client_email ||
 			!config.serviceAccount?.private_key
 		) {
-			throw new Error(
+			throw new E_ARCHIVE_INVALID_DRIVER_CONFIG([
 				"GcsDriver: `serviceAccount.client_email` and `serviceAccount.private_key` are required.",
-			);
+			]);
 		}
 		this.#config = config;
 	}
@@ -181,7 +188,10 @@ export class GcsDriver implements StorageDriver {
 			body: requestBody(body),
 		});
 		if (!res.ok) {
-			throw new Error(`GCS PUT failed (${res.status}): ${await res.text()}`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`GCS PUT failed (${res.status}): ${await res.text()}`,
+			);
 		}
 		// GCS has no ACL in the media-upload call; apply visibility after.
 		if (options?.visibility !== undefined) {
@@ -192,11 +202,12 @@ export class GcsDriver implements StorageDriver {
 	async getBytes(filePath: string): Promise<Uint8Array> {
 		const buf = await this.get(filePath);
 		if (buf === null) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`GCS object does not exist at path '${filePath}'`,
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`GCS object does not exist at path '${filePath}'`,
+				]),
 				{
-					hint: "Confirm the bucket + key and that the object was put() first.",
+					help: "Confirm the bucket + key and that the object was put() first.",
 				},
 			);
 		}
@@ -227,7 +238,10 @@ export class GcsDriver implements StorageDriver {
 				body: requestBody(buf),
 			});
 			if (!res.ok) {
-				throw new Error(`GCS PUT failed (${res.status}): ${await res.text()}`);
+				throw new E_ARCHIVE_REMOTE_FAILED(
+					res.status,
+					`GCS PUT failed (${res.status}): ${await res.text()}`,
+				);
 			}
 			return;
 		}
@@ -281,17 +295,19 @@ export class GcsDriver implements StorageDriver {
 			body: "{}",
 		});
 		if (!res.ok) {
-			throw new Error(
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
 				`GCS resumable upload could not start (${res.status}): ${await res.text()}`,
 			);
 		}
 		const session = res.headers.get("location");
 		if (session === null || !session.startsWith(`${GCS_UPLOAD_ROOT}/`)) {
-			throw new ArchiveError(
-				"E_ARCHIVE_UNEXPECTED_RESPONSE",
-				`GCS answered a resumable upload with an unusable session URI (${JSON.stringify(session)}).`,
+			throw Object.assign(
+				new E_ARCHIVE_UNEXPECTED_RESPONSE([
+					`GCS answered a resumable upload with an unusable session URI (${JSON.stringify(session)}).`,
+				]),
 				{
-					hint: "The upload was not sent anywhere. Retry, or check for a proxy rewriting responses.",
+					help: "The upload was not sent anywhere. Retry, or check for a proxy rewriting responses.",
 				},
 			);
 		}
@@ -323,7 +339,8 @@ export class GcsDriver implements StorageDriver {
 		});
 		if (last) {
 			if (!res.ok) {
-				throw new Error(
+				throw new E_ARCHIVE_REMOTE_FAILED(
+					res.status,
 					`GCS resumable upload failed to finish (${res.status}): ${await res.text()}`,
 				);
 			}
@@ -332,7 +349,8 @@ export class GcsDriver implements StorageDriver {
 		// 308 Resume Incomplete, reporting what the provider has kept.
 		const kept = res.headers.get("range");
 		if (res.status !== 308 || kept !== `bytes=0-${end}`) {
-			throw new Error(
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
 				`GCS resumable upload: chunk at ${offset} not persisted (${res.status}, range ${JSON.stringify(kept)}).`,
 			);
 		}
@@ -346,7 +364,11 @@ export class GcsDriver implements StorageDriver {
 			headers: { authorization: `Bearer ${token}` },
 		});
 		if (res.status === 404) return null;
-		if (!res.ok) throw new Error(`GCS GET failed (${res.status})`);
+		if (!res.ok)
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`GCS GET failed (${res.status})`,
+			);
 		return Buffer.from(await res.arrayBuffer());
 	}
 
@@ -358,15 +380,20 @@ export class GcsDriver implements StorageDriver {
 			headers: { authorization: `Bearer ${token}` },
 		});
 		if (res.status === 404) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`GCS object does not exist at path '${filePath}'`,
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`GCS object does not exist at path '${filePath}'`,
+				]),
 				{
-					hint: "Confirm the bucket + key and that the object was put() first.",
+					help: "Confirm the bucket + key and that the object was put() first.",
 				},
 			);
 		}
-		if (!res.ok) throw new Error(`GCS GET failed (${res.status})`);
+		if (!res.ok)
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`GCS GET failed (${res.status})`,
+			);
 		if (res.body === null) return Readable.from(Buffer.alloc(0));
 		return nodeReadable(res.body);
 	}
@@ -393,7 +420,10 @@ export class GcsDriver implements StorageDriver {
 		// Don't swallow 403/5xx as "not found" — would hide access and
 		// availability errors. Throw so the caller can distinguish.
 		if (!res.ok) {
-			throw new Error(`GCS EXISTS failed (${res.status})`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`GCS EXISTS failed (${res.status})`,
+			);
 		}
 		return true;
 	}
@@ -420,14 +450,18 @@ export class GcsDriver implements StorageDriver {
 			headers: { authorization: `Bearer ${token}` },
 		});
 		if (res.status === 404) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`GCS object does not exist at path '${filePath}'`,
-				{ hint: "Confirm the bucket + key." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`GCS object does not exist at path '${filePath}'`,
+				]),
+				{ help: "Confirm the bucket + key." },
 			);
 		}
 		if (!res.ok) {
-			throw new Error(`GCS HEAD failed (${res.status}): ${await res.text()}`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`GCS HEAD failed (${res.status}): ${await res.text()}`,
+			);
 		}
 		const json = await jsonObject(res, "an object metadata request");
 		// Public only on an explicit allUsers grant: an ACL that is missing or
@@ -470,7 +504,8 @@ export class GcsDriver implements StorageDriver {
 				body: JSON.stringify({ entity: "allUsers", role: "READER" }),
 			});
 			if (!res.ok) {
-				throw new Error(
+				throw new E_ARCHIVE_REMOTE_FAILED(
+					res.status,
 					`GCS setVisibility public failed (${res.status}): ${await res.text()}`,
 				);
 			}
@@ -481,7 +516,8 @@ export class GcsDriver implements StorageDriver {
 			});
 			// 404 = already private (no allUsers ACL) — idempotent success.
 			if (!res.ok && res.status !== 404) {
-				throw new Error(
+				throw new E_ARCHIVE_REMOTE_FAILED(
+					res.status,
 					`GCS setVisibility private failed (${res.status}): ${await res.text()}`,
 				);
 			}
@@ -496,14 +532,18 @@ export class GcsDriver implements StorageDriver {
 			headers: { authorization: `Bearer ${token}` },
 		});
 		if (res.status === 404) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`GCS copy source does not exist at path '${from}'`,
-				{ hint: "Confirm the source object was put() first." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`GCS copy source does not exist at path '${from}'`,
+				]),
+				{ help: "Confirm the source object was put() first." },
 			);
 		}
 		if (!res.ok) {
-			throw new Error(`GCS COPY failed (${res.status}): ${await res.text()}`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`GCS COPY failed (${res.status}): ${await res.text()}`,
+			);
 		}
 		if (options?.visibility !== undefined) {
 			await this.setVisibility(to, options.visibility);
@@ -553,7 +593,10 @@ export class GcsDriver implements StorageDriver {
 			headers: { authorization: `Bearer ${token}` },
 		});
 		if (!res.ok) {
-			throw new Error(`GCS LIST failed (${res.status}): ${await res.text()}`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`GCS LIST failed (${res.status}): ${await res.text()}`,
+			);
 		}
 		const json = await jsonObject(res, "a listing");
 		const objects: Array<DriveFile | DriveDirectory> = [];
@@ -592,7 +635,10 @@ export class GcsDriver implements StorageDriver {
 				headers: { authorization: `Bearer ${token}` },
 			});
 			if (!res.ok) {
-				throw new Error(`GCS LIST failed (${res.status}): ${await res.text()}`);
+				throw new E_ARCHIVE_REMOTE_FAILED(
+					res.status,
+					`GCS LIST failed (${res.status}): ${await res.text()}`,
+				);
 			}
 			const json = await jsonObject(res, "a listing");
 			for (const item of records(json, "items")) {
@@ -731,14 +777,17 @@ export class GcsDriver implements StorageDriver {
 			body,
 		});
 		if (!res.ok) {
-			throw new Error(
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
 				`GCS token exchange failed (${res.status}): ${await res.text()}`,
 			);
 		}
 		const json = await jsonObject(res, "the token exchange");
 		const accessToken = text(json, "access_token");
 		if (!accessToken) {
-			throw new Error("GCS token exchange: access_token missing from response");
+			throw new E_ARCHIVE_UNEXPECTED_RESPONSE([
+				"GCS token exchange: access_token missing from response",
+			]);
 		}
 		const expiresIn =
 			typeof json.expires_in === "number" ? json.expires_in : 3600;
@@ -773,10 +822,11 @@ async function jsonObject(
 ): Promise<Record<string, unknown>> {
 	const json: unknown = await res.json();
 	if (!isRecord(json)) {
-		throw new ArchiveError(
-			"E_ARCHIVE_UNEXPECTED_RESPONSE",
-			`GCS answered ${what} with something other than a JSON object.`,
-			{ hint: "Check for a proxy rewriting responses to the storage API." },
+		throw Object.assign(
+			new E_ARCHIVE_UNEXPECTED_RESPONSE([
+				`GCS answered ${what} with something other than a JSON object.`,
+			]),
+			{ help: "Check for a proxy rewriting responses to the storage API." },
 		);
 	}
 	return json;

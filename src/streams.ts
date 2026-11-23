@@ -5,6 +5,7 @@
  */
 
 import { Readable } from "node:stream";
+import { E_ARCHIVE_CONTENT_LENGTH_EXCEEDED } from "./errors.js";
 
 /** A chunk of a Node readable as bytes (string chunks are UTF-8). */
 export function toBuffer(chunk: unknown): Buffer {
@@ -44,9 +45,7 @@ export async function collectToBuffer(
 		total += buf.length;
 		if (total > maxBytes) {
 			if (hasDestroy(readable)) readable.destroy();
-			throw new Error(
-				`putStream: readable exceeded declared contentLength (${total} > ${maxBytes})`,
-			);
+			throw new E_ARCHIVE_CONTENT_LENGTH_EXCEEDED([total, maxBytes]);
 		}
 		chunks.push(buf);
 	}

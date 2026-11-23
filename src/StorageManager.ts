@@ -11,20 +11,42 @@ import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import * as url from "node:url";
 import { errnoCode } from "./errno.js";
-import { ArchiveError } from "./errors.js";
+import {
+	E_ARCHIVE_INVALID_KEY,
+	E_ARCHIVE_INVALID_ROUTE_BASE_PATH,
+	E_ARCHIVE_NOT_FOUND,
+	E_ARCHIVE_PATH_TRAVERSAL_DETECTED,
+	E_ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED,
+	E_ARCHIVE_SIGNING_DISABLED,
+	E_ARCHIVE_VISIBILITY_CORRUPT,
+	E_ARCHIVE_VISIBILITY_MOVE_FAILED,
+	E_ARCHIVE_WEAK_SIGNING_SECRET,
+	E_CANNOT_COPY_FILE,
+	E_CANNOT_DELETE_DIRECTORY,
+	E_CANNOT_DELETE_FILE,
+	E_CANNOT_GENERATE_URL,
+	E_CANNOT_MOVE_FILE,
+	E_CANNOT_SET_VISIBILITY,
+	E_CANNOT_WRITE_FILE,
+} from "./errors.js";
 import {
 	assertValidExpiry,
 	DEFAULT_EXPIRES_IN,
 	parseExpiry,
 } from "./expiry.js";
-import { normalizeKey, normalizePrefix } from "./keys.js";
+import { isKeyRefusal, normalizeKey, normalizePrefix } from "./keys.js";
 import {
 	overrideQuery,
 	requestedOverrides,
 	signedPayload,
 } from "./local-signature.js";
 import { inferMimeType } from "./mime-types.js";
-import { DriveDirectory, DriveFile, type FileSnapshot } from "./objects.js";
+import {
+	DriveDirectory,
+	DriveFile,
+	type FileSnapshot,
+	wrapFailure,
+} from "./objects.js";
 
 export { DriveDirectory, DriveFile } from "./objects.js";
 
@@ -218,7 +240,7 @@ export interface StorageDriver {
 		options?: SignedUrlOptions,
 	): string | Promise<string>;
 	/**
-	 * Resolve object metadata. Throws `ArchiveError('E_ARCHIVE_NOT_FOUND', ...)`
+	 * Resolve object metadata. Throws `E_ARCHIVE_NOT_FOUND`
 	 * when the object does not exist.
 	 */
 	getMetadata(filePath: string): Promise<Metadata>;
@@ -327,13 +349,7 @@ const O_NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 function routeBasePath(given: string): string {
 	const trimmed = given.replace(/\/+$/, "");
 	if (!/^(\/[^/?#\s]+)+$/.test(trimmed)) {
-		throw new ArchiveError(
-			"E_ARCHIVE_INVALID_ROUTE_BASE_PATH",
-			`LocalDriver routeBasePath must be an absolute URL path such as '/storage', got ${JSON.stringify(given)}`,
-			{
-				hint: "Start it with '/', name at least one segment, and leave out '?', '#' and whitespace.",
-			},
-		);
+		throw new E_ARCHIVE_INVALID_ROUTE_BASE_PATH([JSON.stringify(given)]);
 	}
 	return trimmed;
 }
@@ -370,13 +386,9 @@ export class LocalDriver implements StorageDriver {
 			// HMAC signing. 16 bytes is the floor: rejects obviously weak
 			// values without being annoyingly strict about format.
 			if (released === undefined || released.length < 16) {
-				throw new ArchiveError(
-					"E_ARCHIVE_WEAK_SIGNING_SECRET",
-					`LocalDriver signingSecret must be a string or a Secret wrapping one, at least 16 chars (got ${released === undefined ? "neither" : `length ${released.length}`})`,
-					{
-						hint: "Use a cryptographically random secret, e.g. `crypto.randomBytes(32).toString('hex')`.",
-					},
-				);
+				throw new E_ARCHIVE_WEAK_SIGNING_SECRET([
+					released === undefined ? "neither" : `length ${released.length}`,
+				]);
 			}
 			secret = released;
 		}
@@ -401,10 +413,11 @@ export class LocalDriver implements StorageDriver {
 		// absolute path on Windows, and a containment check is not where to
 		// rely on one layer only.
 		if (!full.startsWith(this.#root + path.sep)) {
-			throw new ArchiveError(
-				"E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
-				`Path traversal blocked: '${filePath}' resolves outside storage root`,
-				{ hint: "Keys are relative to the disk root." },
+			throw Object.assign(
+				new E_ARCHIVE_PATH_TRAVERSAL_DETECTED([
+					`Path traversal blocked: '${filePath}' resolves outside storage root`,
+				]),
+				{ help: "Keys are relative to the disk root." },
 			);
 		}
 		return full;
@@ -428,10 +441,11 @@ export class LocalDriver implements StorageDriver {
 		// same file on a case-insensitive filesystem).
 		for (const segment of key.split("/")) {
 			if (segment.toLowerCase().endsWith(VISIBILITY_SIDECAR_SUFFIX)) {
-				throw new ArchiveError(
-					"E_ARCHIVE_INVALID_KEY",
-					`Invalid key '${filePath}': names ending in '${VISIBILITY_SIDECAR_SUFFIX}' are reserved for visibility markers`,
-					{ hint: "Store the object under a name without that suffix." },
+				throw Object.assign(
+					new E_ARCHIVE_INVALID_KEY([
+						`Invalid key '${filePath}': names ending in '${VISIBILITY_SIDECAR_SUFFIX}' are reserved for visibility markers`,
+					]),
+					{ help: "Store the object under a name without that suffix." },
 				);
 			}
 		}
@@ -459,10 +473,11 @@ export class LocalDriver implements StorageDriver {
 					!realProbe.startsWith(this.#root + path.sep) &&
 					realProbe !== this.#root
 				) {
-					throw new ArchiveError(
-						"E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
-						`Path traversal blocked: '${filePath}' resolves outside storage root via symlink`,
-						{ hint: "A link inside the disk root points outside it." },
+					throw Object.assign(
+						new E_ARCHIVE_PATH_TRAVERSAL_DETECTED([
+							`Path traversal blocked: '${filePath}' resolves outside storage root via symlink`,
+						]),
+						{ help: "A link inside the disk root points outside it." },
 					);
 				}
 				return full;
@@ -590,10 +605,9 @@ export class LocalDriver implements StorageDriver {
 	async getBytes(filePath: string): Promise<Uint8Array> {
 		const buf = await this.get(filePath);
 		if (buf === null) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`File does not exist at path '${filePath}'`,
-				{ hint: "Confirm the path and that the file was put() first." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([`File does not exist at path '${filePath}'`]),
+				{ help: "Confirm the path and that the file was put() first." },
 			);
 		}
 		return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -653,10 +667,11 @@ export class LocalDriver implements StorageDriver {
 			handle = await fsp.open(full, fs.constants.O_RDONLY | O_NOFOLLOW);
 		} catch (err) {
 			if (errnoCode(err) === "ENOENT") {
-				throw new ArchiveError(
-					"E_ARCHIVE_NOT_FOUND",
-					`File does not exist at path '${filePath}'`,
-					{ hint: "Confirm the path and that the file was put() first." },
+				throw Object.assign(
+					new E_ARCHIVE_NOT_FOUND([
+						`File does not exist at path '${filePath}'`,
+					]),
+					{ help: "Confirm the path and that the file was put() first." },
 				);
 			}
 			throw err;
@@ -725,10 +740,11 @@ export class LocalDriver implements StorageDriver {
 			stat = await fsp.stat(full);
 		} catch (err) {
 			if (errnoCode(err) === "ENOENT") {
-				throw new ArchiveError(
-					"E_ARCHIVE_NOT_FOUND",
-					`File does not exist at path '${filePath}'`,
-					{ hint: "Confirm the path and that the file was put() first." },
+				throw Object.assign(
+					new E_ARCHIVE_NOT_FOUND([
+						`File does not exist at path '${filePath}'`,
+					]),
+					{ help: "Confirm the path and that the file was put() first." },
 				);
 			}
 			throw err;
@@ -759,10 +775,11 @@ export class LocalDriver implements StorageDriver {
 	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
 		const full = await this.#safePath(filePath);
 		if (!(await exists(full))) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Cannot set visibility — file does not exist at path '${filePath}'`,
-				{ hint: "put() the file before calling setVisibility()." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Cannot set visibility — file does not exist at path '${filePath}'`,
+				]),
+				{ help: "put() the file before calling setVisibility()." },
 			);
 		}
 		await this.#writeMarker(full, visibility);
@@ -787,11 +804,12 @@ export class LocalDriver implements StorageDriver {
 			// Absent sidecar is the documented default, and it is the common
 			// case: one syscall answers both that and a real read failure.
 			if (errnoCode(err) === "ENOENT") return "public";
-			throw new ArchiveError(
-				"E_ARCHIVE_VISIBILITY_CORRUPT",
-				`Failed to read visibility sidecar for '${filePath}' (${errnoCode(err) ?? "I/O error"}); refusing to default to 'public'.`,
+			throw Object.assign(
+				new E_ARCHIVE_VISIBILITY_CORRUPT([
+					`Failed to read visibility sidecar for '${filePath}' (${errnoCode(err) ?? "I/O error"}); refusing to default to 'public'.`,
+				]),
 				{
-					hint: "Inspect the sidecar file or re-apply visibility via setVisibility().",
+					help: "Inspect the sidecar file or re-apply visibility via setVisibility().",
 				},
 			);
 		}
@@ -799,11 +817,12 @@ export class LocalDriver implements StorageDriver {
 		try {
 			parsed = JSON.parse(raw);
 		} catch {
-			throw new ArchiveError(
-				"E_ARCHIVE_VISIBILITY_CORRUPT",
-				`Sidecar for '${filePath}' is not valid JSON; refusing to default to 'public'.`,
+			throw Object.assign(
+				new E_ARCHIVE_VISIBILITY_CORRUPT([
+					`Sidecar for '${filePath}' is not valid JSON; refusing to default to 'public'.`,
+				]),
 				{
-					hint: "Delete the sidecar file and re-apply visibility via setVisibility().",
+					help: "Delete the sidecar file and re-apply visibility via setVisibility().",
 				},
 			);
 		}
@@ -822,11 +841,12 @@ export class LocalDriver implements StorageDriver {
 		if (visibility === "private" || visibility === "public") {
 			return visibility;
 		}
-		throw new ArchiveError(
-			"E_ARCHIVE_VISIBILITY_CORRUPT",
-			`Sidecar for '${filePath}' carries no usable visibility (${JSON.stringify(visibility)}); refusing to default to 'public'.`,
+		throw Object.assign(
+			new E_ARCHIVE_VISIBILITY_CORRUPT([
+				`Sidecar for '${filePath}' carries no usable visibility (${JSON.stringify(visibility)}); refusing to default to 'public'.`,
+			]),
 			{
-				hint: "Delete the sidecar file and re-apply visibility via setVisibility().",
+				help: "Delete the sidecar file and re-apply visibility via setVisibility().",
 			},
 		);
 	}
@@ -849,11 +869,12 @@ export class LocalDriver implements StorageDriver {
 		assertValidExpiry(expiresIn);
 		const secret = this.#signingSecret;
 		if (secret === null) {
-			throw new ArchiveError(
-				"E_ARCHIVE_SIGNING_DISABLED",
-				"LocalDriver.getSignedUrl requires a signingSecret at construction time",
+			throw Object.assign(
+				new E_ARCHIVE_SIGNING_DISABLED([
+					"LocalDriver.getSignedUrl requires a signingSecret at construction time",
+				]),
 				{
-					hint: "Pass { signingSecret: <hex or random string> } to the LocalDriver constructor, or set config.archive.local.signingSecret. Private files require a signing secret.",
+					help: "Pass { signingSecret: <hex or random string> } to the LocalDriver constructor, or set config.archive.local.signingSecret. Private files require a signing secret.",
 				},
 			);
 		}
@@ -876,13 +897,7 @@ export class LocalDriver implements StorageDriver {
 	 * hand out. Fail loudly rather than return an unusable value.
 	 */
 	getSignedUploadUrl(_filePath: string, _options?: SignedUrlOptions): string {
-		throw new ArchiveError(
-			"E_ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED",
-			"LocalDriver does not support presigned upload URLs",
-			{
-				hint: "Presigned uploads are an S3/GCS feature. For local storage, upload through your app's HTTP handler.",
-			},
-		);
+		throw new E_ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED();
 	}
 
 	/**
@@ -897,10 +912,11 @@ export class LocalDriver implements StorageDriver {
 		const fromFull = await this.#safePath(from);
 		const toFull = await this.#safePath(to);
 		if (!(await exists(fromFull))) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Cannot copy — source does not exist at path '${from}'`,
-				{ hint: "Confirm the source path was put() first." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Cannot copy — source does not exist at path '${from}'`,
+				]),
+				{ help: "Confirm the source path was put() first." },
 			);
 		}
 		await fsp.mkdir(path.dirname(toFull), { recursive: true });
@@ -916,10 +932,11 @@ export class LocalDriver implements StorageDriver {
 		const fromFull = await this.#safePath(from);
 		const toFull = await this.#safePath(to);
 		if (!(await exists(fromFull))) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Cannot move — source does not exist at path '${from}'`,
-				{ hint: "Confirm the source path was put() first." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Cannot move — source does not exist at path '${from}'`,
+				]),
+				{ help: "Confirm the source path was put() first." },
 			);
 		}
 		// Capture source visibility BEFORE the main move. Re-writing the new
@@ -966,13 +983,11 @@ export class LocalDriver implements StorageDriver {
 			try {
 				await this.#writeMarker(toFull, target);
 			} catch (err) {
-				throw new ArchiveError(
-					"E_ARCHIVE_VISIBILITY_MOVE_FAILED",
-					`move('${from}' -> '${to}'): main file moved but visibility sidecar write failed (${errnoCode(err) ?? "unknown"}). Target visibility is undefined.`,
-					{
-						hint: "Re-apply visibility via setVisibility() on the target path.",
-					},
-				);
+				throw new E_ARCHIVE_VISIBILITY_MOVE_FAILED([
+					from,
+					to,
+					errnoCode(err) ?? "unknown",
+				]);
 			}
 		}
 		if (capturedVisibility !== undefined) {
@@ -1199,6 +1214,12 @@ function localPath(source: string | URL): string {
 /**
  * The disk an application talks to: one driver behind it, and every key
  * normalised (see `keys.ts`) before that driver sees it, whatever the driver.
+ *
+ * As the storage library's disk does, each operation wraps a driver failure in
+ * its own error — `E_CANNOT_WRITE_FILE`, `E_CANNOT_READ_FILE`, … — with the
+ * driver's error (`E_ARCHIVE_NOT_FOUND`, `E_ARCHIVE_REMOTE_FAILED`, an errno
+ * error) as `cause`. A refused key keeps its own code; `list` / `listAll` are
+ * not wrapped, as upstream does not wrap `listAll`.
  */
 export class StorageManager {
 	#driver: StorageDriver;
@@ -1212,7 +1233,11 @@ export class StorageManager {
 		content: Buffer | string,
 		options?: WriteOptions,
 	): Promise<void> {
-		return this.#driver.put(normalizeKey(filePath), content, options);
+		const key = normalizeKey(filePath);
+		return wrapFailure(
+			() => this.#driver.put(key, content, options),
+			(cause) => new E_CANNOT_WRITE_FILE([key], { cause }),
+		);
 	}
 
 	/**
@@ -1277,7 +1302,9 @@ export class StorageManager {
 			// actually explains the failure.
 			stream.on("error", () => {});
 			stream.destroy();
-			throw error;
+			throw isKeyRefusal(error)
+				? error
+				: new E_CANNOT_WRITE_FILE([key], { cause: error });
 		}
 	}
 
@@ -1302,89 +1329,130 @@ export class StorageManager {
 		readable: NodeJS.ReadableStream,
 		options?: PutStreamOptions,
 	): Promise<void> {
-		return this.#driver.putStream(normalizeKey(filePath), readable, options);
+		const key = normalizeKey(filePath);
+		return wrapFailure(
+			() => this.#driver.putStream(key, readable, options),
+			(cause) => new E_CANNOT_WRITE_FILE([key], { cause }),
+		);
 	}
 
+	/** Contents, `null` when absent; any failure is `E_CANNOT_READ_FILE`. */
 	async get(filePath: string): Promise<Buffer | null> {
-		return this.#driver.get(normalizeKey(filePath));
+		return this.file(filePath).get();
 	}
 
-	/** Contents as a `Uint8Array`. Throws `E_ARCHIVE_NOT_FOUND` if absent. */
+	/**
+	 * Contents as a `Uint8Array`. An absent object is `E_CANNOT_READ_FILE`,
+	 * with `E_ARCHIVE_NOT_FOUND` as its `cause`.
+	 */
 	async getBytes(filePath: string): Promise<Uint8Array> {
-		return this.#driver.getBytes(normalizeKey(filePath));
+		return this.file(filePath).getBytes();
 	}
 
 	/** @deprecated AdonisJS Drive alias — use {@link StorageManager.getBytes}. */
 	async getArrayBuffer(filePath: string): Promise<Uint8Array> {
-		return this.#driver.getBytes(normalizeKey(filePath));
+		return this.file(filePath).getBytes();
 	}
 
 	async getStream(filePath: string): Promise<NodeJS.ReadableStream> {
-		return this.#driver.getStream(normalizeKey(filePath));
+		return this.file(filePath).getStream();
 	}
 
 	async delete(filePath: string): Promise<boolean> {
-		return this.#driver.delete(normalizeKey(filePath));
+		const key = normalizeKey(filePath);
+		return wrapFailure(
+			() => this.#driver.delete(key),
+			(cause) => new E_CANNOT_DELETE_FILE([key], { cause }),
+		);
 	}
 
 	async exists(filePath: string): Promise<boolean> {
-		return this.#driver.exists(normalizeKey(filePath));
+		return this.file(filePath).exists();
 	}
 
 	async url(filePath: string): Promise<string> {
-		return this.#driver.url(normalizeKey(filePath));
+		return this.file(filePath).getUrl();
 	}
 
 	/** AdonisJS Drive name for {@link url}. */
 	async getUrl(filePath: string): Promise<string> {
-		return this.#driver.url(normalizeKey(filePath));
+		return this.file(filePath).getUrl();
 	}
 
 	publicUrl(filePath: string): string {
-		return this.#driver.publicUrl(normalizeKey(filePath));
+		const key = normalizeKey(filePath);
+		try {
+			return this.#driver.publicUrl(key);
+		} catch (error) {
+			throw isKeyRefusal(error)
+				? error
+				: new E_CANNOT_GENERATE_URL([key], { cause: error });
+		}
 	}
 
 	getSignedUrl(
 		filePath: string,
 		options?: SignedUrlOptions,
 	): string | Promise<string> {
-		return this.#driver.getSignedUrl(normalizeKey(filePath), options);
+		return this.file(filePath).getSignedUrl(options);
 	}
 
 	getSignedUploadUrl(
 		filePath: string,
 		options?: SignedUrlOptions,
 	): string | Promise<string> {
-		return this.#driver.getSignedUploadUrl(normalizeKey(filePath), options);
+		return this.file(filePath).getSignedUploadUrl(options);
 	}
 
 	async getMetadata(filePath: string): Promise<Metadata> {
-		return this.#driver.getMetadata(normalizeKey(filePath));
+		return this.file(filePath).getMetaData();
 	}
 
 	/** AdonisJS Drive casing for {@link getMetadata}. */
 	async getMetaData(filePath: string): Promise<Metadata> {
-		return this.#driver.getMetadata(normalizeKey(filePath));
+		return this.file(filePath).getMetaData();
 	}
 
 	async getVisibility(filePath: string): Promise<Visibility> {
-		return this.#driver.getVisibility(normalizeKey(filePath));
+		return this.file(filePath).getVisibility();
 	}
 
 	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
-		return this.#driver.setVisibility(normalizeKey(filePath), visibility);
+		const key = normalizeKey(filePath);
+		return wrapFailure(
+			() => this.#driver.setVisibility(key, visibility),
+			(cause) => new E_CANNOT_SET_VISIBILITY([key], { cause }),
+		);
 	}
 
 	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
-		return this.#driver.copy(normalizeKey(from), normalizeKey(to), options);
+		const source = normalizeKey(from);
+		const destination = normalizeKey(to);
+		return wrapFailure(
+			() => this.#driver.copy(source, destination, options),
+			(cause) => new E_CANNOT_COPY_FILE([source, destination], { cause }),
+		);
 	}
 
 	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
-		return this.#driver.move(normalizeKey(from), normalizeKey(to), options);
+		const source = normalizeKey(from);
+		const destination = normalizeKey(to);
+		return wrapFailure(
+			() => this.#driver.move(source, destination, options),
+			(cause) => new E_CANNOT_MOVE_FILE([source, destination], { cause }),
+		);
 	}
 
 	async deleteAll(prefix: string): Promise<void> {
-		return this.#driver.deleteAll(normalizePrefix(prefix));
+		const normalized = normalizePrefix(prefix);
+		return wrapFailure(
+			() => this.#driver.deleteAll(normalized),
+			// The root reads as "/", the way the library names it.
+			(cause) =>
+				new E_CANNOT_DELETE_DIRECTORY([normalized === "" ? "/" : normalized], {
+					cause,
+				}),
+		);
 	}
 
 	list(prefix: string): AsyncIterable<StorageEntry> {

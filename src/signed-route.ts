@@ -5,7 +5,8 @@
  * on success, serves the file from the driver. Tampered signatures →
  * 403 `E_ARCHIVE_INVALID_SIGNATURE`. Expired `exp` → 403
  * `E_ARCHIVE_EXPIRED_SIGNATURE`. A valid signature for a file that is not
- * stored → 404 `E_ARCHIVE_NOT_FOUND`.
+ * stored → 404 `E_ARCHIVE_NOT_FOUND`. Any other failure to serve a file is
+ * thrown as `E_CANNOT_SERVE_FILE`, the failure as its `cause`.
  * No signature at all → the file's visibility decides: a public file is
  * served, a private one refused with 403 `E_ARCHIVE_ACCESS_DENIED`, and a
  * name that is not stored falls through to `next()`.
@@ -14,9 +15,14 @@
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { ArchiveError } from "./errors.js";
+import {
+	E_ARCHIVE_NOT_FOUND,
+	E_ARCHIVE_PREFIX_MISMATCH,
+	E_ARCHIVE_SIGNING_DISABLED,
+	E_CANNOT_SERVE_FILE,
+} from "./errors.js";
 import { matchesIfNoneMatch } from "./etag.js";
-import { normalizeKey } from "./keys.js";
+import { isKeyRefusal, normalizeKey } from "./keys.js";
 import {
 	HEADER_OVERRIDES,
 	type HeaderOverride,
@@ -99,19 +105,13 @@ export function createSignedRouteHandler(
 		options.prefix !== undefined &&
 		options.prefix.replace(/\/+$/, "") !== prefix
 	) {
-		throw new ArchiveError(
-			"E_ARCHIVE_PREFIX_MISMATCH",
-			`createSignedRouteHandler: prefix '${options.prefix}' does not match the driver's routeBasePath '${prefix}', so no URL the driver signs would ever reach this route.`,
-			{
-				hint: "Set routeBasePath on the LocalDriver (or services.fs) and leave prefix out.",
-			},
-		);
+		throw new E_ARCHIVE_PREFIX_MISMATCH([options.prefix, prefix]);
 	}
 	const secret = options.driver.getSigningSecret();
 	if (secret === null) {
-		throw new Error(
+		throw new E_ARCHIVE_SIGNING_DISABLED([
 			"createSignedRouteHandler: driver has no signingSecret configured. Pass { signingSecret } to LocalDriver first.",
-		);
+		]);
 	}
 	const storage = options.storage;
 
@@ -176,7 +176,7 @@ export function createSignedRouteHandler(
 			} catch (err) {
 				// A name the disk refuses (a visibility marker's) is answered,
 				// not thrown into the application's error handler.
-				if (isKeyError(err)) {
+				if (isKeyRefusal(err)) {
 					invalidKey(ctx);
 					return;
 				}
@@ -299,7 +299,7 @@ export function createSignedRouteHandler(
 			metadata = await storage.getMetadata(filePath);
 		} catch (err) {
 			if (isNotFound(err)) return notFound(ctx);
-			throw err;
+			throw new E_CANNOT_SERVE_FILE(err);
 		}
 		ctx.response.header("ETag", metadata.etag);
 		ctx.response.header("Last-Modified", metadata.lastModified.toUTCString());
@@ -326,32 +326,39 @@ export function createSignedRouteHandler(
 		} catch (err) {
 			// Deleted between the metadata read and the open.
 			if (isNotFound(err)) return notFound(ctx);
-			throw err;
+			throw new E_CANNOT_SERVE_FILE(err);
 		}
 		ctx.response.status(200);
 		await ctx.response.stream(body);
 	}
 }
 
-/** The refusals a disk raises for a key it will not address. */
-const KEY_ERRORS = new Set([
-	"E_ARCHIVE_INVALID_KEY",
-	"E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
-	"E_ARCHIVE_UNALLOWED_CHARACTERS",
-]);
+/**
+ * `err` and the errors it was caused by: a disk operation hands the driver's
+ * error on as the `cause` of its own (`E_CANNOT_GET_METADATA` caused by
+ * `E_ARCHIVE_NOT_FOUND`).
+ */
+function* causeChain(err: unknown): Generator<unknown> {
+	const seen = new Set<unknown>();
+	let current = err;
+	while (current !== undefined && !seen.has(current)) {
+		seen.add(current);
+		yield current;
+		current = current instanceof Error ? current.cause : undefined;
+	}
+}
 
 function isNotFound(err: unknown): boolean {
-	return err instanceof ArchiveError && err.code === "E_ARCHIVE_NOT_FOUND";
+	for (const error of causeChain(err)) {
+		if (error instanceof E_ARCHIVE_NOT_FOUND) return true;
+	}
+	return false;
 }
 
 function notFound(ctx: SignedRouteHttpContext): void {
 	ctx.response.status(404).json({
 		error: { code: "E_ARCHIVE_NOT_FOUND", message: "File not found" },
 	});
-}
-
-function isKeyError(err: unknown): boolean {
-	return err instanceof ArchiveError && KEY_ERRORS.has(err.code);
 }
 
 function invalidKey(ctx: SignedRouteHttpContext): void {

@@ -17,7 +17,7 @@ import { AssertionError } from "node:assert";
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
 import type { Plugin, PluginApi, TestContext } from "@c9up/helix";
-import { ArchiveError } from "../errors.js";
+import { E_ARCHIVE_INVALID_PREDICATE, E_ARCHIVE_NOT_FOUND } from "../errors.js";
 import {
 	assertValidExpiry,
 	DEFAULT_EXPIRES_IN,
@@ -75,10 +75,11 @@ export class FakeStorage implements StorageDriver {
 	async getBytes(filePath: string): Promise<Uint8Array> {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Fake object does not exist at path '${filePath}'`,
-				{ hint: "put() it first, or verify the test setup." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Fake object does not exist at path '${filePath}'`,
+				]),
+				{ help: "put() it first, or verify the test setup." },
 			);
 		}
 		return new Uint8Array(obj.content);
@@ -112,10 +113,11 @@ export class FakeStorage implements StorageDriver {
 	async getStream(filePath: string): Promise<NodeJS.ReadableStream> {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Fake object does not exist at path '${filePath}'`,
-				{ hint: "put() it first, or verify the test setup." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Fake object does not exist at path '${filePath}'`,
+				]),
+				{ help: "put() it first, or verify the test setup." },
 			);
 		}
 		return Readable.from(obj.content);
@@ -162,10 +164,11 @@ export class FakeStorage implements StorageDriver {
 	async getVisibility(filePath: string): Promise<Visibility> {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Fake object does not exist at path '${filePath}'`,
-				{ hint: "put() it first, or verify the test setup." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Fake object does not exist at path '${filePath}'`,
+				]),
+				{ help: "put() it first, or verify the test setup." },
 			);
 		}
 		return obj.visibility;
@@ -174,10 +177,11 @@ export class FakeStorage implements StorageDriver {
 	async getMetadata(filePath: string): Promise<Metadata> {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Fake object does not exist at path '${filePath}'`,
-				{ hint: "put() it first, or verify the test setup." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Fake object does not exist at path '${filePath}'`,
+				]),
+				{ help: "put() it first, or verify the test setup." },
 			);
 		}
 		// Weak ETag deterministic on content hash — useful for
@@ -197,10 +201,11 @@ export class FakeStorage implements StorageDriver {
 	async setVisibility(filePath: string, visibility: Visibility): Promise<void> {
 		const obj = this.#store.get(filePath);
 		if (!obj) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Cannot set visibility — fake object does not exist at path '${filePath}'`,
-				{ hint: "put() the file before calling setVisibility()." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Cannot set visibility — fake object does not exist at path '${filePath}'`,
+				]),
+				{ help: "put() the file before calling setVisibility()." },
 			);
 		}
 		obj.visibility = visibility;
@@ -209,10 +214,11 @@ export class FakeStorage implements StorageDriver {
 	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const src = this.#store.get(from);
 		if (!src) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Cannot copy — fake source does not exist at path '${from}'`,
-				{ hint: "Confirm the source path was put() first." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Cannot copy — fake source does not exist at path '${from}'`,
+				]),
+				{ help: "Confirm the source path was put() first." },
 			);
 		}
 		// Default visibility on the new object — matches LocalDriver
@@ -228,10 +234,11 @@ export class FakeStorage implements StorageDriver {
 	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const src = this.#store.get(from);
 		if (!src) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`Cannot move — fake source does not exist at path '${from}'`,
-				{ hint: "Confirm the source path was put() first." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`Cannot move — fake source does not exist at path '${from}'`,
+				]),
+				{ help: "Confirm the source path was put() first." },
 			);
 		}
 		// Move preserves visibility — identity is preserved (an explicit
@@ -381,18 +388,18 @@ export class FakeStorage implements StorageDriver {
 		for (const [p, obj] of this.#store) {
 			if (match(p, obj)) return;
 		}
-		throw new Error(
-			`storage.assertStored('${path}'${describeStoragePredicate(predicate)}) failed — no captured object matches.\n${describeStorageCaptured(this.#store)}`,
-		);
+		throw new AssertionError({
+			message: `storage.assertStored('${path}'${describeStoragePredicate(predicate)}) failed — no captured object matches.\n${describeStorageCaptured(this.#store)}`,
+		});
 	}
 
 	assertNotStored(path: string, predicate?: FakeStoragePredicateArg): void {
 		const match = makeStorageMatcher(path, predicate);
 		for (const [p, obj] of this.#store) {
 			if (match(p, obj)) {
-				throw new Error(
-					`storage.assertNotStored('${path}'${describeStoragePredicate(predicate)}) failed — at least one captured object matches.\n${describeStorageCaptured(this.#store)}`,
-				);
+				throw new AssertionError({
+					message: `storage.assertNotStored('${path}'${describeStoragePredicate(predicate)}) failed — at least one captured object matches.\n${describeStorageCaptured(this.#store)}`,
+				});
 			}
 		}
 	}
@@ -476,9 +483,7 @@ function makeStorageMatcher(
 	// `for (...) match(...)` would silently never see the throw if the
 	// store happens to be empty, hiding the test-fixture mistake.
 	if (predicate.contentContaining === "") {
-		throw new Error(
-			"FakeStorage: `contentContaining` predicate cannot be an empty string — it would match every captured object.",
-		);
+		throw new E_ARCHIVE_INVALID_PREDICATE();
 	}
 	const expectedMime = predicate.mimeType?.toLowerCase();
 	return (p, obj) => {

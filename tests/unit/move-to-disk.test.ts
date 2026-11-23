@@ -169,11 +169,11 @@ describe("MultipartFile.moveToDisk", () => {
 	});
 
 	it.each([
-		["../escape.txt", "E_ARCHIVE_PATH_TRAVERSAL_DETECTED"],
-		["avatars/%2e%2e/%2e%2e/escape.txt", "E_ARCHIVE_PATH_TRAVERSAL_DETECTED"],
-		["avatars\\..\\..\\escape.txt", "E_ARCHIVE_UNALLOWED_CHARACTERS"],
-		["a/%2f/escape.txt", "E_ARCHIVE_UNALLOWED_CHARACTERS"],
-		["//", "E_ARCHIVE_INVALID_KEY"],
+		["../escape.txt", "E_PATH_TRAVERSAL_DETECTED"],
+		["avatars/%2e%2e/%2e%2e/escape.txt", "E_PATH_TRAVERSAL_DETECTED"],
+		["avatars\\..\\..\\escape.txt", "E_UNALLOWED_CHARACTERS"],
+		["a/%2f/escape.txt", "E_UNALLOWED_CHARACTERS"],
+		["//", "E_INVALID_KEY"],
 	])("refuses the key %j with %s, writing nothing", async (key, code) => {
 		const disks = await boot();
 		const file = await upload();

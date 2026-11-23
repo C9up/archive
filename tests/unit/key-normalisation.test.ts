@@ -22,9 +22,9 @@ import {
 import { normalizeKey, normalizePrefix } from "../../src/keys.js";
 import { FakeStorage } from "../../src/testing/FakeStorage.js";
 
-const traversal = { code: "E_ARCHIVE_PATH_TRAVERSAL_DETECTED" };
-const unallowed = { code: "E_ARCHIVE_UNALLOWED_CHARACTERS" };
-const invalid = { code: "E_ARCHIVE_INVALID_KEY" };
+const traversal = { code: "E_PATH_TRAVERSAL_DETECTED" };
+const unallowed = { code: "E_UNALLOWED_CHARACTERS" };
+const invalid = { code: "E_INVALID_KEY" };
 
 afterEach(() => {
 	vi.unstubAllGlobals();

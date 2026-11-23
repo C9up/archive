@@ -21,7 +21,7 @@ export {
 	type FsServiceOptions,
 	services,
 } from "./DriveManager.js";
-export { ArchiveError } from "./errors.js";
+export * as errors from "./errors.js";
 export {
 	type GcsConfig,
 	GcsDriver,

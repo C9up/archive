@@ -10,7 +10,7 @@
  * overrides keeps the payload it always had.
  */
 
-import { ArchiveError } from "./errors.js";
+import { E_ARCHIVE_INVALID_HEADER_VALUE } from "./errors.js";
 
 /** Override query parameters, in signing order, and the header each sets. */
 export const HEADER_OVERRIDES = [
@@ -46,11 +46,7 @@ export function requestedOverrides(options: {
 		const value = options[param];
 		if (value === undefined || value === "") continue;
 		if (!isHeaderValue(value)) {
-			throw new ArchiveError(
-				"E_ARCHIVE_INVALID_HEADER_VALUE",
-				`${param} cannot be signed as a ${header} value: it contains a control character`,
-				{ hint: "Header values cannot carry CR, LF, NUL or other controls." },
-			);
+			throw new E_ARCHIVE_INVALID_HEADER_VALUE([param, header]);
 		}
 		overrides.push([param, value]);
 	}

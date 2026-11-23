@@ -10,9 +10,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Readable } from "node:stream";
+import { Exception } from "@c9up/flare";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DriveManager, services } from "../../src/DriveManager.js";
-import { ArchiveError } from "../../src/errors.js";
 import {
 	FakeStorage,
 	FakeStorageManager,
@@ -210,12 +210,12 @@ describe("archive > the fake behind a manager", () => {
 	});
 });
 
-/** The ArchiveError code `run` throws, or `undefined` when it does not throw one. */
+/** The error code `run` throws, or `undefined` when it does not throw one. */
 function unknownDiskCode(run: () => unknown): string | undefined {
 	try {
 		run();
 	} catch (error) {
-		if (error instanceof ArchiveError) return error.code;
+		if (error instanceof Exception) return error.code;
 		throw error;
 	}
 	return undefined;
@@ -246,10 +246,10 @@ describe("archive > choosing a disk", () => {
 			new DriveManager(config()).use("typo");
 			expect.unreachable("an undeclared disk has to be refused");
 		} catch (error) {
-			const archive = error as { message: string; hint?: string };
+			const archive = error as { message: string; help?: string };
 			expect(archive.message).toMatch(/'typo' is not configured/);
 			// The list is what turns a typo into a one-second fix.
-			expect(archive.hint).toContain("local, backup");
+			expect(archive.help).toContain("local, backup");
 		}
 	});
 

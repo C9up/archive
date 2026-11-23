@@ -192,7 +192,11 @@ describe("FakeStorage", () => {
 
 	it("assertStored throws when the path was not put()", () => {
 		expect(() => storage.assertStored("nope.txt")).toThrow(
-			/no captured object matches/,
+			expect.objectContaining({
+				name: "AssertionError",
+				code: "ERR_ASSERTION",
+				message: expect.stringMatching(/no captured object matches/),
+			}),
 		);
 	});
 
@@ -210,7 +214,12 @@ describe("FakeStorage", () => {
 		await storage.put("a.txt", "any");
 		expect(() =>
 			storage.assertStored("a.txt", { contentContaining: "" }),
-		).toThrow(/cannot be an empty string/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_ARCHIVE_INVALID_PREDICATE",
+				message: expect.stringMatching(/cannot be an empty string/),
+			}),
+		);
 	});
 
 	it("assertStored with mimeType narrows", async () => {
@@ -240,7 +249,11 @@ describe("FakeStorage", () => {
 	it("assertNotStored throws when the path was put()", async () => {
 		await storage.put("a.txt", "x");
 		expect(() => storage.assertNotStored("a.txt")).toThrow(
-			/at least one captured object matches/,
+			expect.objectContaining({
+				name: "AssertionError",
+				code: "ERR_ASSERTION",
+				message: expect.stringMatching(/at least one captured object matches/),
+			}),
 		);
 	});
 });

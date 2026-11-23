@@ -49,6 +49,47 @@ describe("GcsDriver", () => {
 	});
 
 	describe("auth", () => {
+		it("refuses a config without a bucket or service account", () => {
+			expect(
+				() =>
+					new GcsDriver({
+						bucket: "",
+						serviceAccount: { client_email: "a@b.test", private_key: "k" },
+					}),
+			).toThrow(
+				expect.objectContaining({ code: "E_ARCHIVE_INVALID_DRIVER_CONFIG" }),
+			);
+			expect(
+				() =>
+					new GcsDriver({
+						bucket: "b",
+						serviceAccount: { client_email: "", private_key: "k" },
+					}),
+			).toThrow(
+				expect.objectContaining({ code: "E_ARCHIVE_INVALID_DRIVER_CONFIG" }),
+			);
+		});
+
+		it("reports a refused token exchange as a remote failure", async () => {
+			fetchSpy.mockResolvedValueOnce(new Response("nope", { status: 401 }));
+			await expect(driver.exists("x")).rejects.toMatchObject({
+				code: "E_ARCHIVE_REMOTE_FAILED",
+				providerStatus: 401,
+			});
+		});
+
+		it("refuses a token answer without an access_token", async () => {
+			fetchSpy.mockResolvedValueOnce(
+				new Response(JSON.stringify({ expires_in: 3600 }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			);
+			await expect(driver.exists("x")).rejects.toMatchObject({
+				code: "E_ARCHIVE_UNEXPECTED_RESPONSE",
+			});
+		});
+
 		it("exchanges a JWT for an access token on first call", async () => {
 			fetchSpy.mockResolvedValueOnce(tokenResponse());
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
@@ -149,9 +190,11 @@ describe("GcsDriver", () => {
 			// Swallowing access errors as "not found" would mask a config
 			// problem (bad auth scopes) behind a silent false result.
 			fetchSpy.mockResolvedValueOnce(new Response("denied", { status: 403 }));
-			await expect(driver.exists("protected")).rejects.toThrow(
-				/GCS EXISTS failed/,
-			);
+			await expect(driver.exists("protected")).rejects.toMatchObject({
+				code: "E_ARCHIVE_REMOTE_FAILED",
+				providerStatus: 403,
+				message: expect.stringMatching(/GCS EXISTS failed/),
+			});
 		});
 	});
 
@@ -536,9 +579,11 @@ describe("GcsDriver > listing, deleting a prefix, and the rest", () => {
 
 		// An empty listing reads as "the prefix is empty", which is how a
 		// deleteAll over it silently does nothing.
-		await expect(driver.listAll("a")).rejects.toThrow(
-			/GCS LIST failed \(403\)/,
-		);
+		await expect(driver.listAll("a")).rejects.toMatchObject({
+			code: "E_ARCHIVE_REMOTE_FAILED",
+			providerStatus: 403,
+			message: expect.stringMatching(/GCS LIST failed \(403\)/),
+		});
 	});
 
 	it("deletes every object under a prefix, one at a time", async () => {

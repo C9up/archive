@@ -18,7 +18,7 @@
  *   await drive.use('s3').put('a.txt', 'hi')   // named disk
  */
 
-import { ArchiveError } from "./errors.js";
+import { E_ARCHIVE_UNKNOWN_DISK } from "./errors.js";
 import type { GcsConfig } from "./GcsDriver.js";
 import { GcsDriver } from "./GcsDriver.js";
 import type { S3Config } from "./S3Driver.js";
@@ -119,11 +119,12 @@ export class DriveManager {
 
 	constructor(config: DriveConfig) {
 		if (serviceFactory(config.services, config.default) === undefined) {
-			throw new ArchiveError(
-				"E_ARCHIVE_UNKNOWN_DISK",
-				`Archive default disk '${config.default}' is not present in config.services`,
+			throw Object.assign(
+				new E_ARCHIVE_UNKNOWN_DISK([
+					`Archive default disk '${config.default}' is not present in config.services`,
+				]),
 				{
-					hint: `Add a '${config.default}' entry to config.services, or point config.default at an existing disk.`,
+					help: `Add a '${config.default}' entry to config.services, or point config.default at an existing disk.`,
 				},
 			);
 		}
@@ -143,11 +144,12 @@ export class DriveManager {
 		if (cached) return cached;
 		const factory = serviceFactory(this.#config.services, name);
 		if (factory === undefined) {
-			throw new ArchiveError(
-				"E_ARCHIVE_UNKNOWN_DISK",
-				`Archive disk '${name}' is not configured`,
+			throw Object.assign(
+				new E_ARCHIVE_UNKNOWN_DISK([
+					`Archive disk '${name}' is not configured`,
+				]),
 				{
-					hint: `Known disks: ${Object.keys(this.#config.services).join(", ") || "(none)"}.`,
+					help: `Known disks: ${Object.keys(this.#config.services).join(", ") || "(none)"}.`,
 				},
 			);
 		}

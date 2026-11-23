@@ -10,6 +10,7 @@
  * Populated by `ArchiveProvider.boot()`.
  */
 
+import { E_ARCHIVE_INTERNAL, E_ARCHIVE_NOT_BOOTED } from "../errors.js";
 import { StorageManager } from "../StorageManager.js";
 
 let instance: StorageManager | undefined;
@@ -61,7 +62,7 @@ export function clearStorage(): void {
 function inertTarget(): StorageManager {
 	const target: unknown = Object.create(StorageManager.prototype);
 	if (!(target instanceof StorageManager)) {
-		throw new Error("[archive] could not build the storage accessor");
+		throw new E_ARCHIVE_INTERNAL();
 	}
 	return target;
 }
@@ -82,11 +83,7 @@ const storage: StorageManager = new Proxy(inertTarget(), {
 			resolve = undefined;
 		}
 		if (!instance) {
-			throw new Error(
-				"[archive] StorageManager singleton accessed before ArchiveProvider.boot() ran. " +
-					"Check that `@c9up/archive/provider` is listed in your reamrc.ts providers, " +
-					"and that an `archive` config block is set.",
-			);
+			throw new E_ARCHIVE_NOT_BOOTED();
 		}
 		const value = Reflect.get(instance, prop, instance);
 		return typeof value === "function" ? value.bind(instance) : value;

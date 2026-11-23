@@ -14,6 +14,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { Readable } from "node:stream";
+import { E_ARCHIVE_INVALID_STATIC_PREFIX } from "./errors.js";
 import { matchesIfNoneMatch, statTag } from "./etag.js";
 import { DEFAULT_EXTENSIONS, inferMimeType } from "./mime-types.js";
 import { VISIBILITY_SIDECAR_SUFFIX } from "./StorageManager.js";
@@ -175,9 +176,7 @@ export class StaticMiddleware {
 		// is rarely what a caller wants and always a misconfiguration
 		// risk. Require the caller to pick a real URL prefix.
 		if (prefix === "") {
-			throw new Error(
-				"StaticMiddleware: prefix cannot be empty. Use '/static' (default) or a specific path like '/assets'.",
-			);
+			throw new E_ARCHIVE_INVALID_STATIC_PREFIX();
 		}
 		const resolved = path.resolve(config.root);
 		// Canonicalise the root so the realpath check in handle() can

@@ -17,30 +17,38 @@
  * or a separator once some layer decodes it.
  */
 
-import { ArchiveError } from "./errors.js";
+import type { Exception } from "@c9up/flare";
+import {
+	E_ARCHIVE_INVALID_KEY,
+	E_ARCHIVE_PATH_TRAVERSAL_DETECTED,
+	E_INVALID_KEY,
+	E_PATH_TRAVERSAL_DETECTED,
+	E_UNALLOWED_CHARACTERS,
+} from "./errors.js";
 
 /** `%2e` (`.`), `%2f` (`/`), `%5c` (`\`), `%00` (NUL), any case. */
 const ENCODED_SEPARATOR = /%(2f|5c|00)/i;
 const ENCODED_DOT = /%2e/gi;
 
-function unallowed(key: string, what: string): ArchiveError {
-	return new ArchiveError(
-		"E_ARCHIVE_UNALLOWED_CHARACTERS",
-		`The key ${JSON.stringify(key)} has unallowed characters: ${what}`,
-		{
-			hint: "Use '/' as the only separator, and no control characters.",
-		},
-	);
+/**
+ * The key as the messages quote it: escaped the way JSON escapes a string, so
+ * a CR, LF or other control character a refused key carries cannot forge a
+ * log line, but without JSON's own quotes — the message supplies them.
+ */
+function quoted(key: string): string {
+	return JSON.stringify(key).slice(1, -1);
 }
 
-function traversal(key: string): ArchiveError {
-	return new ArchiveError(
-		"E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
-		`Path traversal segment detected in key ${JSON.stringify(key)}`,
-		{
-			hint: "Keys are relative to the disk: build them without '..' segments.",
-		},
-	);
+function unallowed(key: string, what: string): Exception {
+	const error = new E_UNALLOWED_CHARACTERS([quoted(key)]);
+	// The library's message names the key only; which character is refused
+	// goes in `help`.
+	error.help = `Refused: ${what}. Use '/' as the only separator, and no control characters.`;
+	return error;
+}
+
+function traversal(key: string): Exception {
+	return new E_PATH_TRAVERSAL_DETECTED([quoted(key)]);
 }
 
 /**
@@ -72,21 +80,34 @@ function segments(key: string): string[] {
 	return kept;
 }
 
+/** The refusals of a key a disk will not address. */
+const KEY_REFUSALS = [
+	E_INVALID_KEY,
+	E_PATH_TRAVERSAL_DETECTED,
+	E_UNALLOWED_CHARACTERS,
+	E_ARCHIVE_INVALID_KEY,
+	E_ARCHIVE_PATH_TRAVERSAL_DETECTED,
+];
+
+/**
+ * Whether `error` refuses a key rather than reports a failed operation: the
+ * normaliser's codes, and the two the local disk adds (a reserved marker name,
+ * a path that escapes the root).
+ */
+export function isKeyRefusal(error: unknown): boolean {
+	return KEY_REFUSALS.some((Refusal) => error instanceof Refusal);
+}
+
 /**
  * Normalise an object key: collapse repeated `/`, drop `.` segments and the
- * leading/trailing `/`. Throws `E_ARCHIVE_PATH_TRAVERSAL_DETECTED` on a
- * dot-only segment, `E_ARCHIVE_UNALLOWED_CHARACTERS` on a control character,
- * a backslash or an encoded separator, and `E_ARCHIVE_INVALID_KEY` when
- * nothing is left.
+ * leading/trailing `/`. Throws `E_PATH_TRAVERSAL_DETECTED` on a dot-only
+ * segment, `E_UNALLOWED_CHARACTERS` on a control character, a backslash or an
+ * encoded separator, and `E_INVALID_KEY` when nothing is left.
  */
 export function normalizeKey(key: string): string {
 	const normalized = segments(key).join("/");
 	if (normalized === "") {
-		throw new ArchiveError(
-			"E_ARCHIVE_INVALID_KEY",
-			`Invalid key ${JSON.stringify(key)}. After normalization results in an empty string`,
-			{ hint: "Name the object: a key cannot be empty or only separators." },
-		);
+		throw new E_INVALID_KEY([quoted(key)]);
 	}
 	return normalized;
 }

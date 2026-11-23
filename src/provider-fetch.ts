@@ -22,7 +22,8 @@
  *     holds a chunk.
  */
 
-import { ArchiveError } from "./errors.js";
+import type { Exception } from "@c9up/flare";
+import { E_ARCHIVE_REQUEST_TIMEOUT } from "./errors.js";
 
 /** Size of the slices an outgoing body is handed to the transport in. */
 const UPLOAD_SLICE = 64 * 1024;
@@ -30,14 +31,8 @@ const UPLOAD_SLICE = 64 * 1024;
 /** Statuses a `Response` may not be constructed with a body for. */
 const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
 
-function timeoutError(ms: number): ArchiveError {
-	return new ArchiveError(
-		"E_ARCHIVE_REQUEST_TIMEOUT",
-		`The storage provider did not answer within ${ms}ms.`,
-		{
-			hint: "The bound is an idle timeout: raise `requestTimeoutMs` for a slow link, or check connectivity to the bucket.",
-		},
-	);
+function timeoutError(ms: number): Exception {
+	return new E_ARCHIVE_REQUEST_TIMEOUT([ms]);
 }
 
 /**

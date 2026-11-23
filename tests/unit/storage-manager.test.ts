@@ -283,15 +283,21 @@ describe("archive > LocalDriver > signing-secret validation", () => {
 
 describe("archive > LocalDriver > security guards", () => {
 	it("rejects filenames containing NUL / LF / CR control characters", async () => {
-		await expect(driver.put("bad\nname.txt", "x")).rejects.toThrow(
-			/control characters/,
-		);
-		await expect(driver.put("bad\rname.txt", "x")).rejects.toThrow(
-			/control characters/,
-		);
-		await expect(driver.put("bad\0name.txt", "x")).rejects.toThrow(
-			/control characters/,
-		);
+		// The library's message names the key, escaped so a CR or LF cannot
+		// forge a log line; which character is refused goes in `help`.
+		await expect(driver.put("bad\nname.txt", "x")).rejects.toMatchObject({
+			code: "E_UNALLOWED_CHARACTERS",
+			message: 'The key "bad\\nname.txt" has unallowed characters',
+			help: expect.stringMatching(/control characters/),
+		});
+		await expect(driver.put("bad\rname.txt", "x")).rejects.toMatchObject({
+			code: "E_UNALLOWED_CHARACTERS",
+			help: expect.stringMatching(/control characters/),
+		});
+		await expect(driver.put("bad\0name.txt", "x")).rejects.toMatchObject({
+			code: "E_UNALLOWED_CHARACTERS",
+			help: expect.stringMatching(/control characters/),
+		});
 	});
 
 	it("rejects path traversal via leading '..'", async () => {
@@ -328,7 +334,7 @@ describe("archive > LocalDriver > security guards", () => {
 		try {
 			const key = path.join("..", `${path.basename(root)}2`, "x.txt");
 			await expect(driver.put(key, "x")).rejects.toMatchObject({
-				code: "E_ARCHIVE_PATH_TRAVERSAL_DETECTED",
+				code: "E_PATH_TRAVERSAL_DETECTED",
 			});
 			// The same sibling reached through a link planted inside the root
 			// is the case only the separator-aware check stops.

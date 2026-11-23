@@ -10,9 +10,15 @@
  * The upload is written to the disk, `file.meta.url` is set to its URL when
  * the disk can name one, and the file is marked as moved under its key.
  */
+
+import type { Exception } from "@c9up/flare";
 import type { MultipartFile } from "@c9up/ream";
 import type { DriveManager } from "./DriveManager.js";
-import { ArchiveError } from "./errors.js";
+import {
+	E_ARCHIVE_INVALID_KEY,
+	E_ARCHIVE_INVALID_MOVE_OPTIONS,
+	E_ARCHIVE_MULTIPART_NOT_MACROABLE,
+} from "./errors.js";
 import { normalizeKey } from "./keys.js";
 import type { Visibility, WriteOptions } from "./StorageManager.js";
 
@@ -78,13 +84,7 @@ export async function extendMultipartFile(
 			? Reflect.get(loaded, "MultipartFile")
 			: undefined;
 	if (!isMacroableClass(multipartFile)) {
-		throw new ArchiveError(
-			"E_ARCHIVE_MULTIPART_NOT_MACROABLE",
-			"The installed @c9up/ream has no macroable MultipartFile: uploads cannot be given moveToDisk().",
-			{
-				hint: "Upgrade @c9up/ream to a version whose MultipartFile extends Macroable.",
-			},
-		);
+		throw new E_ARCHIVE_MULTIPART_NOT_MACROABLE();
 	}
 	multipartFile.macro(
 		"moveToDisk",
@@ -105,10 +105,11 @@ async function moveToDisk(
 ): Promise<void> {
 	const [key, diskOrOptions, writeOptions] = args;
 	if (typeof key !== "string") {
-		throw new ArchiveError(
-			"E_ARCHIVE_INVALID_KEY",
-			`moveToDisk() takes the object key as a string, got ${typeof key}`,
-			{ hint: "Pass the key first: file.moveToDisk('avatars/1.png')." },
+		throw Object.assign(
+			new E_ARCHIVE_INVALID_KEY([
+				`moveToDisk() takes the object key as a string, got ${typeof key}`,
+			]),
+			{ help: "Pass the key first: file.moveToDisk('avatars/1.png')." },
 		);
 	}
 	let diskName: string | undefined;
@@ -171,14 +172,8 @@ async function moveToDisk(
 	file.markAsMoved(normalized, normalized);
 }
 
-function invalidOptions(what: string): ArchiveError {
-	return new ArchiveError(
-		"E_ARCHIVE_INVALID_MOVE_OPTIONS",
-		`Invalid moveToDisk() options: ${what}`,
-		{
-			hint: "moveToDisk(key, disk?, { visibility, contentType, cacheControl, contentDisposition, contentLength, moveAs }).",
-		},
-	);
+function invalidOptions(what: string): Exception {
+	return new E_ARCHIVE_INVALID_MOVE_OPTIONS([what]);
 }
 
 function optionalString(

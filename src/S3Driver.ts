@@ -13,7 +13,12 @@
 
 import { createHash, createHmac } from "node:crypto";
 import { Readable } from "node:stream";
-import { ArchiveError } from "./errors.js";
+import {
+	E_ARCHIVE_INVALID_DRIVER_CONFIG,
+	E_ARCHIVE_NOT_FOUND,
+	E_ARCHIVE_REMOTE_FAILED,
+	E_ARCHIVE_UNEXPECTED_RESPONSE,
+} from "./errors.js";
 import {
 	assertValidExpiry,
 	DEFAULT_EXPIRES_IN,
@@ -111,9 +116,9 @@ export class S3Driver implements StorageDriver {
 		// non-AWS-default region (e.g. eu-west-3) and produce signature
 		// errors only at runtime — much better to fail fast here.
 		if (!config.endpoint && !config.region) {
-			throw new Error(
+			throw new E_ARCHIVE_INVALID_DRIVER_CONFIG([
 				"S3Driver: either `region` or `endpoint` is required. Pass `region` for AWS S3, or `endpoint` for S3-compatible services (MinIO, R2, etc.).",
-			);
+			]);
 		}
 		this.#config = config;
 		const rawEndpoint =
@@ -157,7 +162,10 @@ export class S3Driver implements StorageDriver {
 			body: requestBody(body),
 		});
 		if (!res.ok) {
-			throw new Error(`S3 PUT failed (${res.status}): ${await res.text()}`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`S3 PUT failed (${res.status}): ${await res.text()}`,
+			);
 		}
 	}
 
@@ -186,7 +194,10 @@ export class S3Driver implements StorageDriver {
 				body: requestBody(body),
 			});
 			if (!res.ok) {
-				throw new Error(`S3 PUT failed (${res.status}): ${await res.text()}`);
+				throw new E_ARCHIVE_REMOTE_FAILED(
+					res.status,
+					`S3 PUT failed (${res.status}): ${await res.text()}`,
+				);
 			}
 			return;
 		}
@@ -235,15 +246,20 @@ export class S3Driver implements StorageDriver {
 		const headers = this.#signRequest({ method: "GET", key: filePath });
 		const res = await this.#fetch(url, { method: "GET", headers });
 		if (res.status === 404) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`S3 object does not exist at path '${filePath}'`,
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`S3 object does not exist at path '${filePath}'`,
+				]),
 				{
-					hint: "Confirm the bucket + key and that the object was put() first.",
+					help: "Confirm the bucket + key and that the object was put() first.",
 				},
 			);
 		}
-		if (!res.ok) throw new Error(`S3 GET failed (${res.status})`);
+		if (!res.ok)
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`S3 GET failed (${res.status})`,
+			);
 		if (res.body === null) {
 			// Edge case: 200 with no body. Return an empty readable.
 			return Readable.from(Buffer.alloc(0));
@@ -257,7 +273,11 @@ export class S3Driver implements StorageDriver {
 
 		const res = await this.#fetch(url, { method: "GET", headers });
 		if (res.status === 404) return null;
-		if (!res.ok) throw new Error(`S3 GET failed (${res.status})`);
+		if (!res.ok)
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`S3 GET failed (${res.status})`,
+			);
 
 		const arrayBuffer = await res.arrayBuffer();
 		return Buffer.from(arrayBuffer);
@@ -268,15 +288,20 @@ export class S3Driver implements StorageDriver {
 		const headers = this.#signRequest({ method: "GET", key: filePath });
 		const res = await this.#fetch(url, { method: "GET", headers });
 		if (res.status === 404) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`S3 object does not exist at path '${filePath}'`,
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`S3 object does not exist at path '${filePath}'`,
+				]),
 				{
-					hint: "Confirm the bucket + key and that the object was put() first.",
+					help: "Confirm the bucket + key and that the object was put() first.",
 				},
 			);
 		}
-		if (!res.ok) throw new Error(`S3 GET failed (${res.status})`);
+		if (!res.ok)
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`S3 GET failed (${res.status})`,
+			);
 		return new Uint8Array(await res.arrayBuffer());
 	}
 
@@ -320,16 +345,20 @@ export class S3Driver implements StorageDriver {
 			headers: headHeaders,
 		});
 		if (headRes.status === 404) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`S3 object does not exist at path '${filePath}'`,
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`S3 object does not exist at path '${filePath}'`,
+				]),
 				{
-					hint: "Confirm the bucket + key and that the object was put() first.",
+					help: "Confirm the bucket + key and that the object was put() first.",
 				},
 			);
 		}
 		if (!headRes.ok) {
-			throw new Error(`S3 HEAD failed (${headRes.status})`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				headRes.status,
+				`S3 HEAD failed (${headRes.status})`,
+			);
 		}
 		const size = Number.parseInt(
 			headRes.headers.get("content-length") ?? "0",
@@ -389,10 +418,11 @@ export class S3Driver implements StorageDriver {
 			headers: aclHeaders,
 		});
 		if (aclRes.status === 404) {
-			throw new ArchiveError(
-				"E_ARCHIVE_NOT_FOUND",
-				`S3 object does not exist at path '${filePath}'`,
-				{ hint: "Confirm the bucket + key." },
+			throw Object.assign(
+				new E_ARCHIVE_NOT_FOUND([
+					`S3 object does not exist at path '${filePath}'`,
+				]),
+				{ help: "Confirm the bucket + key." },
 			);
 		}
 		if (aclRes.ok && isPublicAcl(await aclRes.text())) return "public";
@@ -410,7 +440,10 @@ export class S3Driver implements StorageDriver {
 		});
 		const res = await this.#fetch(url, { method: "PUT", headers });
 		if (!res.ok) {
-			throw new Error(`S3 PUT failed (${res.status}): ${await res.text()}`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`S3 PUT failed (${res.status}): ${await res.text()}`,
+			);
 		}
 	}
 
@@ -542,20 +575,27 @@ export class S3Driver implements StorageDriver {
 		if (!res.ok) {
 			const body = await res.text();
 			if (/\bNoSuchKey\b/.test(body) || res.status === 404) {
-				throw new ArchiveError(
-					"E_ARCHIVE_NOT_FOUND",
-					`S3 copy source does not exist at path '${from}'`,
-					{ hint: "Confirm the source object was put() first." },
+				throw Object.assign(
+					new E_ARCHIVE_NOT_FOUND([
+						`S3 copy source does not exist at path '${from}'`,
+					]),
+					{ help: "Confirm the source object was put() first." },
 				);
 			}
-			throw new Error(`S3 COPY failed (${res.status}): ${body}`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`S3 COPY failed (${res.status}): ${body}`,
+			);
 		}
 		// S3 CopyObject can return 200 + an XML <Error> body (streaming
 		// copies that fail mid-flight). Matches the same pattern handled
 		// in #completeMultipartUpload — don't silently succeed.
 		const body = await res.text();
 		if (/<Error>/i.test(body)) {
-			throw new Error(`S3 COPY returned error body: ${body}`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`S3 COPY returned error body: ${body}`,
+			);
 		}
 	}
 
@@ -593,7 +633,8 @@ export class S3Driver implements StorageDriver {
 				headers: listHeaders,
 			});
 			if (!listRes.ok) {
-				throw new Error(
+				throw new E_ARCHIVE_REMOTE_FAILED(
+					listRes.status,
 					`S3 LIST failed (${listRes.status}): ${await listRes.text()}`,
 				);
 			}
@@ -640,7 +681,8 @@ export class S3Driver implements StorageDriver {
 			body: requestBody(body),
 		});
 		if (!res.ok) {
-			throw new Error(
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
 				`S3 DeleteObjects failed (${res.status}): ${await res.text()}`,
 			);
 		}
@@ -679,7 +721,10 @@ export class S3Driver implements StorageDriver {
 		});
 		const res = await this.#fetch(url, { method: "GET", headers });
 		if (!res.ok) {
-			throw new Error(`S3 LIST failed (${res.status}): ${await res.text()}`);
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
+				`S3 LIST failed (${res.status}): ${await res.text()}`,
+			);
 		}
 		const xml = await res.text();
 		const objects: Array<DriveFile | DriveDirectory> = [];
@@ -751,7 +796,10 @@ export class S3Driver implements StorageDriver {
 			});
 			const res = await this.#fetch(url, { method: "GET", headers });
 			if (!res.ok) {
-				throw new Error(`S3 LIST failed (${res.status}): ${await res.text()}`);
+				throw new E_ARCHIVE_REMOTE_FAILED(
+					res.status,
+					`S3 LIST failed (${res.status}): ${await res.text()}`,
+				);
 			}
 			const xml = await res.text();
 			// Parse each <Contents> block independently, then extract
@@ -885,7 +933,8 @@ export class S3Driver implements StorageDriver {
 			: signed;
 		const res = await this.#fetch(url, { method: "POST", headers });
 		if (!res.ok) {
-			throw new Error(
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
 				`S3 multipart initiate failed (${res.status}): ${await res.text()}`,
 			);
 		}
@@ -896,9 +945,9 @@ export class S3Driver implements StorageDriver {
 		// something with optional groups, the `match[1] === undefined`
 		// path must be handled explicitly — not silently defaulted.
 		if (!match || match[1] === undefined) {
-			throw new Error(
+			throw new E_ARCHIVE_UNEXPECTED_RESPONSE([
 				`S3 multipart initiate: UploadId missing from response: ${xml}`,
-			);
+			]);
 		}
 		return xmlUnescape(match[1]);
 	}
@@ -932,15 +981,16 @@ export class S3Driver implements StorageDriver {
 			body: requestBody(body),
 		});
 		if (!res.ok) {
-			throw new Error(
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
 				`S3 UploadPart failed part=${partNumber} (${res.status}): ${await res.text()}`,
 			);
 		}
 		const etag = res.headers.get("etag");
 		if (!etag) {
-			throw new Error(
+			throw new E_ARCHIVE_UNEXPECTED_RESPONSE([
 				`S3 UploadPart part=${partNumber}: ETag missing from response`,
-			);
+			]);
 		}
 		// Keep the quotes — CompleteMultipartUpload XML requires the
 		// ETag value exactly as S3 returned it.
@@ -974,7 +1024,8 @@ export class S3Driver implements StorageDriver {
 			body: requestBody(xmlBody),
 		});
 		if (!res.ok) {
-			throw new Error(
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
 				`S3 CompleteMultipartUpload failed (${res.status}): ${await res.text()}`,
 			);
 		}
@@ -985,7 +1036,8 @@ export class S3Driver implements StorageDriver {
 			/^\s*<\?xml[^?]*\?>\s*<Error>/i.test(text) ||
 			/^\s*<Error>/.test(text)
 		) {
-			throw new Error(
+			throw new E_ARCHIVE_REMOTE_FAILED(
+				res.status,
 				`S3 CompleteMultipartUpload returned Error body: ${text}`,
 			);
 		}

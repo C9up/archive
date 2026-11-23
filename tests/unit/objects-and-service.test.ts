@@ -76,7 +76,14 @@ describe("archive > the file handle from a listing", () => {
 		const file = await handle();
 
 		expect(() => file.getSignedUploadUrl()).toThrow(
-			/does not support presigned upload URLs/,
+			expect.objectContaining({
+				code: "E_CANNOT_GENERATE_URL",
+				cause: expect.objectContaining({
+					message: expect.stringMatching(
+						/does not support presigned upload URLs/,
+					),
+				}),
+			}),
 		);
 	});
 
@@ -120,7 +127,12 @@ describe("archive > the service accessor", () => {
 
 	it("says what to wire when it is read before boot", () => {
 		expect(() => storage.put).toThrow(
-			/accessed before ArchiveProvider\.boot\(\)/,
+			expect.objectContaining({
+				code: "E_ARCHIVE_NOT_BOOTED",
+				message: expect.stringMatching(
+					/accessed before ArchiveProvider\.boot\(\)/,
+				),
+			}),
 		);
 	});
 

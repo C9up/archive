@@ -287,6 +287,21 @@ describe("createSignedRouteHandler", () => {
 		expect(errorCode(response.json)).toBe("E_ARCHIVE_NOT_FOUND");
 	});
 
+	it("throws E_CANNOT_SERVE_FILE when the file cannot be read for another reason", async () => {
+		await driver.put("cat.txt", "hello");
+		const url = driver.getSignedUrl("cat.txt");
+		const failure = new Error("disk on fire");
+		vi.spyOn(storage, "getMetadata").mockRejectedValue(failure);
+		const { ctx } = buildCtx("GET", url);
+		await expect(middleware(ctx, vi.fn())).rejects.toMatchObject({
+			name: "CannotServeFileException",
+			code: "E_CANNOT_SERVE_FILE",
+			status: 500,
+			message: "Cannot serve local file using drive",
+			cause: failure,
+		});
+	});
+
 	it("answers every refusal with a code in the package's namespace", async () => {
 		await driver.put("cat.txt", "hello");
 		const url = driver.getSignedUrl("cat.txt");
@@ -408,7 +423,12 @@ describe("createSignedRouteHandler", () => {
 				storage: new StorageManager(noSignDriver),
 				driver: noSignDriver,
 			}),
-		).toThrow(/signingSecret/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_ARCHIVE_SIGNING_DISABLED",
+				message: expect.stringMatching(/signingSecret/),
+			}),
+		);
 	});
 });
 

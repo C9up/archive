@@ -124,8 +124,19 @@ describe("S3Driver", () => {
 		fetchSpy.mockResolvedValueOnce(
 			new Response("access denied", { status: 403 }),
 		);
-		await expect(driver.put("x", Buffer.from("y"))).rejects.toThrow(
-			/S3 PUT failed/i,
+		await expect(driver.put("x", Buffer.from("y"))).rejects.toMatchObject({
+			code: "E_ARCHIVE_REMOTE_FAILED",
+			providerStatus: 403,
+			message: expect.stringMatching(/S3 PUT failed/i),
+		});
+	});
+
+	it("refuses a config with neither region nor endpoint", () => {
+		expect(
+			() =>
+				new S3Driver({ bucket: "b", accessKeyId: "k", secretAccessKey: "s" }),
+		).toThrow(
+			expect.objectContaining({ code: "E_ARCHIVE_INVALID_DRIVER_CONFIG" }),
 		);
 	});
 
@@ -416,7 +427,11 @@ describe("S3Driver", () => {
 
 			await expect(
 				driver.putStream("boom.bin", Readable.from(Buffer.alloc(100))),
-			).rejects.toThrow(/UploadPart failed/);
+			).rejects.toMatchObject({
+				code: "E_ARCHIVE_REMOTE_FAILED",
+				providerStatus: 403,
+				message: expect.stringMatching(/UploadPart failed/),
+			});
 			// Call 3 should be the abort (DELETE ?uploadId=abortMe).
 			const abortCall = fetchSpy.mock.calls[2];
 			expect(requestInit(2).method).toBe("DELETE");
@@ -476,6 +491,35 @@ describe("S3Driver", () => {
 			await expect(driver.copy("nope", "dst")).rejects.toMatchObject({
 				code: "E_ARCHIVE_NOT_FOUND",
 			});
+		});
+
+		it("copy reports a 200 that carries an <Error> body as a remote failure", async () => {
+			fetchSpy.mockResolvedValueOnce(
+				new Response("<Error><Code>InternalError</Code></Error>", {
+					status: 200,
+				}),
+			);
+			await expect(driver.copy("src/a.txt", "dst/b.txt")).rejects.toMatchObject(
+				{ code: "E_ARCHIVE_REMOTE_FAILED", providerStatus: 200 },
+			);
+		});
+
+		it("putStream refuses a multipart initiate answer without an UploadId", async () => {
+			fetchSpy.mockResolvedValueOnce(
+				new Response("<InitiateMultipartUploadResult/>", { status: 200 }),
+			);
+			await expect(
+				driver.putStream("big.bin", Readable.from(Buffer.alloc(100))),
+			).rejects.toMatchObject({ code: "E_ARCHIVE_UNEXPECTED_RESPONSE" });
+		});
+
+		it("putStream refuses a body longer than the declared contentLength", async () => {
+			await expect(
+				driver.putStream("small.txt", Readable.from(Buffer.alloc(10)), {
+					contentLength: 4,
+				}),
+			).rejects.toMatchObject({ code: "E_ARCHIVE_CONTENT_LENGTH_EXCEEDED" });
+			expect(fetchSpy).not.toHaveBeenCalled();
 		});
 
 		it("list paginates via continuation-token across two requests", async () => {

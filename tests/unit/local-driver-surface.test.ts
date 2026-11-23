@@ -237,7 +237,7 @@ describe("archive > the local disk", () => {
 		it("blocks a path that climbs out of the root", async () => {
 			await expect(
 				driver.put("../escaped.txt", Buffer.from("x")),
-			).rejects.toMatchObject({ code: "E_ARCHIVE_PATH_TRAVERSAL_DETECTED" });
+			).rejects.toMatchObject({ code: "E_PATH_TRAVERSAL_DETECTED" });
 		});
 	});
 });
@@ -336,7 +336,60 @@ describe("archive > the manager over a disk", () => {
 
 	it("refuses a presigned upload URL the local disk cannot honour", () => {
 		expect(() => disk.getSignedUploadUrl("a.txt")).toThrow(
-			/does not support presigned upload URLs/,
+			expect.objectContaining({
+				code: "E_CANNOT_GENERATE_URL",
+				message: 'Cannot generate URL for file at location "a.txt"',
+				cause: expect.objectContaining({
+					code: "E_ARCHIVE_SIGNED_UPLOAD_UNSUPPORTED",
+				}),
+			}),
 		);
+	});
+
+	it("wraps each failed operation in its own error, the driver's as the cause", async () => {
+		const notFound = expect.objectContaining({ code: "E_ARCHIVE_NOT_FOUND" });
+		await expect(disk.getBytes("missing.txt")).rejects.toMatchObject({
+			code: "E_CANNOT_READ_FILE",
+			status: 500,
+			message: 'Cannot read file from location "missing.txt"',
+			cause: notFound,
+		});
+		await expect(disk.getStream("missing.txt")).rejects.toMatchObject({
+			code: "E_CANNOT_READ_FILE",
+			cause: notFound,
+		});
+		await expect(disk.getMetaData("missing.txt")).rejects.toMatchObject({
+			code: "E_CANNOT_GET_METADATA",
+			message: 'Unable to retrieve metadata of file at location "missing.txt"',
+			cause: notFound,
+		});
+		await expect(disk.copy("missing.txt", "b.txt")).rejects.toMatchObject({
+			code: "E_CANNOT_COPY_FILE",
+			message: 'Cannot copy file from "missing.txt" to "b.txt"',
+		});
+		await expect(disk.move("missing.txt", "b.txt")).rejects.toMatchObject({
+			code: "E_CANNOT_MOVE_FILE",
+			message: 'Cannot move file from "missing.txt" to "b.txt"',
+		});
+		await expect(
+			disk.setVisibility("missing.txt", "private"),
+		).rejects.toMatchObject({ code: "E_CANNOT_SET_VISIBILITY" });
+
+		// Absence is an answer, not a failure, where the call can say so.
+		expect(await disk.exists("missing.txt")).toBe(false);
+		expect(await disk.get("missing.txt")).toBeNull();
+	});
+
+	it("wraps a failed write, and leaves a refused key its own code", async () => {
+		// A directory where the file should go: the write itself fails.
+		fs.mkdirSync(path.join(root, "taken"));
+		await expect(disk.put("taken", "x")).rejects.toMatchObject({
+			code: "E_CANNOT_WRITE_FILE",
+			message: 'Cannot write file at location "taken"',
+			cause: expect.any(Error),
+		});
+		await expect(disk.put("../escape.txt", "x")).rejects.toMatchObject({
+			code: "E_PATH_TRAVERSAL_DETECTED",
+		});
 	});
 });

@@ -25,7 +25,12 @@
  */
 import "./augmentations.js";
 import { type DriveConfig, DriveManager } from "./DriveManager.js";
-import { ArchiveError } from "./errors.js";
+import {
+	E_ARCHIVE_CONFIG_MISSING,
+	E_ARCHIVE_INVALID_DRIVER,
+	E_ARCHIVE_PROVIDER_NOT_REGISTERED,
+	E_ARCHIVE_TEMPLATE_ENGINE,
+} from "./errors.js";
 
 import { type GcsConfig, GcsDriver } from "./GcsDriver.js";
 import { extendMultipartFile } from "./move-to-disk.js";
@@ -142,13 +147,7 @@ export default class ArchiveProvider {
 	async boot(): Promise<void> {
 		const storage = this.#storage;
 		if (storage === undefined) {
-			throw new ArchiveError(
-				"E_ARCHIVE_PROVIDER_NOT_REGISTERED",
-				"ArchiveProvider.boot() ran before register().",
-				{
-					hint: "Providers register before they boot — call register() first.",
-				},
-			);
+			throw new E_ARCHIVE_PROVIDER_NOT_REGISTERED();
 		}
 		// The accessor reads the same cell the container's bindings read, so
 		// however storage is reached there is one manager behind it.
@@ -227,13 +226,7 @@ export default class ArchiveProvider {
 		if (isPluggable(engine)) engine.use(plugin);
 		else if (publishesGlobals(engine)) plugin(engine);
 		else {
-			throw new ArchiveError(
-				"E_ARCHIVE_TEMPLATE_ENGINE",
-				"The app renders with inker, but its module exposes neither use() nor global(): the drive template helpers cannot be published.",
-				{
-					hint: "Install a @c9up/inker version whose default export has use(plugin) or global(name, value).",
-				},
-			);
+			throw new E_ARCHIVE_TEMPLATE_ENGINE();
 		}
 	}
 
@@ -305,11 +298,12 @@ function resolveDriveConfig(
 function buildDriver(config: ArchiveConfig): StorageDriver {
 	if (config.driver === "s3") {
 		if (!config.s3) {
-			throw new ArchiveError(
-				"E_ARCHIVE_CONFIG_MISSING",
-				"Archive config.driver is 's3' but config.s3 is missing",
+			throw Object.assign(
+				new E_ARCHIVE_CONFIG_MISSING([
+					"Archive config.driver is 's3' but config.s3 is missing",
+				]),
 				{
-					hint: "Provide { bucket, accessKeyId, secretAccessKey, region?, endpoint? } under config.archive.s3.",
+					help: "Provide { bucket, accessKeyId, secretAccessKey, region?, endpoint? } under config.archive.s3.",
 				},
 			);
 		}
@@ -317,11 +311,12 @@ function buildDriver(config: ArchiveConfig): StorageDriver {
 	}
 	if (config.driver === "gcs") {
 		if (!config.gcs) {
-			throw new ArchiveError(
-				"E_ARCHIVE_CONFIG_MISSING",
-				"Archive config.driver is 'gcs' but config.gcs is missing",
+			throw Object.assign(
+				new E_ARCHIVE_CONFIG_MISSING([
+					"Archive config.driver is 'gcs' but config.gcs is missing",
+				]),
 				{
-					hint: "Provide { bucket, serviceAccount: { client_email, private_key } } under config.archive.gcs.",
+					help: "Provide { bucket, serviceAccount: { client_email, private_key } } under config.archive.gcs.",
 				},
 			);
 		}
@@ -337,9 +332,5 @@ function buildDriver(config: ArchiveConfig): StorageDriver {
 	// Reject unknown driver values explicitly so a typo like
 	// `{ driver: 'locla' }` does not silently fall through to the
 	// local driver and write files to an unexpected location.
-	throw new ArchiveError(
-		"E_ARCHIVE_INVALID_DRIVER",
-		`Archive config.driver must be 'local', 's3', or 'gcs', got '${String(config.driver)}'`,
-		{ hint: "Set config.archive.driver to 'local', 's3', or 'gcs'." },
-	);
+	throw new E_ARCHIVE_INVALID_DRIVER([String(config.driver)]);
 }

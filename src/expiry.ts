@@ -4,7 +4,7 @@
  * consistent across backends.
  */
 
-import { ArchiveError } from "./errors.js";
+import { E_ARCHIVE_INVALID_EXPIRY } from "./errors.js";
 
 /** Default expiry for signed URLs when the caller does not specify one. */
 export const DEFAULT_EXPIRES_IN = 300; // 5 minutes
@@ -53,11 +53,12 @@ export function parseExpiry(expiresIn: number | string): number {
 	const unitKey = match?.[2]?.toLowerCase() ?? "";
 	const multiplier = unitKey === "" ? 1 : UNIT_SECONDS[unitKey];
 	if (match === undefined || match === null || multiplier === undefined) {
-		throw new ArchiveError(
-			"E_ARCHIVE_INVALID_EXPIRY",
-			`Signed-URL expiresIn string '${expiresIn}' could not be parsed`,
+		throw Object.assign(
+			new E_ARCHIVE_INVALID_EXPIRY([
+				`Signed-URL expiresIn string '${expiresIn}' could not be parsed`,
+			]),
 			{
-				hint: "Use a number of seconds, or a duration like '30mins', '1h', '7 days'.",
+				help: "Use a number of seconds, or a duration like '30mins', '1h', '7 days'.",
 			},
 		);
 	}
@@ -71,24 +72,27 @@ export function parseExpiry(expiresIn: number | string): number {
  */
 export function assertValidExpiry(expiresIn: number): void {
 	if (!Number.isFinite(expiresIn)) {
-		throw new ArchiveError(
-			"E_ARCHIVE_INVALID_EXPIRY",
-			`Signed-URL expiresIn must be finite, got ${expiresIn}`,
-			{ hint: "Pass a positive number of seconds between 1 and 604800." },
+		throw Object.assign(
+			new E_ARCHIVE_INVALID_EXPIRY([
+				`Signed-URL expiresIn must be finite, got ${expiresIn}`,
+			]),
+			{ help: "Pass a positive number of seconds between 1 and 604800." },
 		);
 	}
 	if (expiresIn <= 0) {
-		throw new ArchiveError(
-			"E_ARCHIVE_INVALID_EXPIRY",
-			`Signed-URL expiresIn must be > 0 seconds, got ${expiresIn}`,
-			{ hint: "Pass a positive number of seconds between 1 and 604800." },
+		throw Object.assign(
+			new E_ARCHIVE_INVALID_EXPIRY([
+				`Signed-URL expiresIn must be > 0 seconds, got ${expiresIn}`,
+			]),
+			{ help: "Pass a positive number of seconds between 1 and 604800." },
 		);
 	}
 	if (expiresIn > MAX_EXPIRES_IN) {
-		throw new ArchiveError(
-			"E_ARCHIVE_INVALID_EXPIRY",
-			`Signed-URL expiresIn must be <= ${MAX_EXPIRES_IN} seconds (7 days), got ${expiresIn}`,
-			{ hint: "AWS SigV4 caps presigned URLs at 7 days." },
+		throw Object.assign(
+			new E_ARCHIVE_INVALID_EXPIRY([
+				`Signed-URL expiresIn must be <= ${MAX_EXPIRES_IN} seconds (7 days), got ${expiresIn}`,
+			]),
+			{ help: "AWS SigV4 caps presigned URLs at 7 days." },
 		);
 	}
 }

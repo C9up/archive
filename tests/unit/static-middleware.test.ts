@@ -72,6 +72,12 @@ describe("StaticMiddleware", () => {
 		fs.rmSync(root, { recursive: true, force: true });
 	});
 
+	it("refuses an empty prefix", () => {
+		expect(() => new StaticMiddleware({ root, prefix: "" })).toThrow(
+			expect.objectContaining({ code: "E_ARCHIVE_INVALID_STATIC_PREFIX" }),
+		);
+	});
+
 	it("does not serve a symlink pointing outside the root", async () => {
 		const outside = fs.mkdtempSync(path.join(os.tmpdir(), "archive-secret-"));
 		try {

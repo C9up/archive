@@ -6,7 +6,7 @@ import { Secret } from "@c9up/ream";
 import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DriveManager, services } from "../../src/DriveManager.js";
-import { ArchiveError, LocalDriver } from "../../src/index.js";
+import { errors, LocalDriver } from "../../src/index.js";
 import { stubsRoot } from "../../src/stubs.js";
 
 const KEY = "a-signing-key-of-32-bytes-aaaaaa";
@@ -63,7 +63,7 @@ describe("LocalDriver > signingSecret given as a Secret", () => {
 			} catch (error) {
 				thrown = error;
 			}
-			expect(thrown).toBeInstanceOf(ArchiveError);
+			expect(thrown).toBeInstanceOf(errors.E_ARCHIVE_WEAK_SIGNING_SECRET);
 			expect(thrown).toMatchObject({ code: "E_ARCHIVE_WEAK_SIGNING_SECRET" });
 		}
 	});
