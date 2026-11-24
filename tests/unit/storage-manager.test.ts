@@ -42,12 +42,12 @@ describe("archive > LocalDriver > stream + copy/move/list", () => {
 		});
 	});
 
-	it("copy duplicates the object and does NOT carry visibility over", async () => {
+	it("copy duplicates the object and carries its visibility over", async () => {
 		await driver.put("src.txt", "x");
 		await driver.setVisibility("src.txt", "private");
 		await driver.copy("src.txt", "dest.txt");
 		const meta = await driver.getMetadata("dest.txt");
-		expect(meta.visibility).toBe("public"); // sidecar is intentionally NOT copied
+		expect(meta.visibility).toBe("private");
 	});
 
 	it("copy throws E_ARCHIVE_NOT_FOUND when the source is missing", async () => {
@@ -421,12 +421,11 @@ describe("archive > LocalDriver > listing reads only the prefixed subtree", () =
 				"avatars/42/a.png",
 				"avatars/42/b.png",
 			]);
-			// A prefix that ends mid-name still matches by prefix.
-			expect(await paths("avatars/4")).toEqual([
-				"avatars/4.png",
+			// A prefix names a directory: `avatars/4` is not `avatars/42`.
+			expect(await paths("avatars/4")).toEqual([]);
+			expect(await paths("avatars/42")).toEqual([
 				"avatars/42/a.png",
 				"avatars/42/b.png",
-				"avatars/43/c.png",
 			]);
 			expect(await paths("missing/")).toEqual([]);
 			expect(await paths("avatars/4.png/")).toEqual([]);

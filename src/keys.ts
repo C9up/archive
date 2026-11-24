@@ -113,13 +113,20 @@ export function normalizeKey(key: string): string {
 }
 
 /**
- * Normalise a listing prefix. Same rules as {@link normalizeKey}, except that
- * the root (`""` or `/`) is a valid prefix and a trailing `/` is kept: it is
- * what tells `avatars/` (that directory) from `avatars` (anything starting
- * with those letters).
+ * Normalise a listing or deletion prefix into the DIRECTORY it names. Same
+ * rules as {@link normalizeKey}, except that the root (`""` or `/`) is a valid
+ * prefix (and stays `""`, everything); any other prefix ends with `/`, so
+ * `users/1` and `users/1/` both reach `users/1/**` and never `users/10/**`.
+ *
+ * Read as raw string prefixes, `deleteAll('users/1')` also deleted the files
+ * of users 10 to 19, 100 to 199… with no error. This is the meaning
+ * flydrive's FS driver (`rm -r` of that directory) and GCS driver (trailing
+ * `/` forced) give a prefix.
+ *
+ * NAMED DEVIATION (stricter than flydrive's S3 driver, which hands the prefix
+ * to S3 as is): the same directory meaning on every driver, S3 included.
  */
 export function normalizePrefix(prefix: string): string {
 	const normalized = segments(prefix).join("/");
-	if (normalized === "") return "";
-	return prefix.endsWith("/") ? `${normalized}/` : normalized;
+	return normalized === "" ? "" : `${normalized}/`;
 }

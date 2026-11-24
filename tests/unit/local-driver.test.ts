@@ -311,14 +311,13 @@ describe("LocalDriver", () => {
 	});
 
 	describe("copy / move / list", () => {
-		it("copy duplicates content and takes default (public) visibility even when source is private", async () => {
+		it("copy duplicates content and carries a private source's visibility", async () => {
 			await driver.put("src.txt", "payload");
 			await driver.setVisibility("src.txt", "private");
 			await driver.copy("src.txt", "dst.txt");
 			expect((await driver.get("dst.txt"))?.toString("utf8")).toBe("payload");
-			// Source preserved as private; dest starts public.
 			expect((await driver.getMetadata("src.txt")).visibility).toBe("private");
-			expect((await driver.getMetadata("dst.txt")).visibility).toBe("public");
+			expect((await driver.getMetadata("dst.txt")).visibility).toBe("private");
 		});
 
 		it("copy throws E_ARCHIVE_NOT_FOUND when source is missing", async () => {

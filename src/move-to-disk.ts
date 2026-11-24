@@ -141,17 +141,14 @@ async function moveToDisk(
 	// pipes that buffer into the disk (a cloud disk still sends a large file
 	// in bounded parts).
 	//
-	// The stream path carries what a streamed write carries: the content
-	// type and the length. Anything else — visibility above all — goes
-	// through put(), which applies it WITH the write. Streaming first and
-	// setting visibility after would leave a `private` upload public on the
-	// local disk (public is its default) until the second call ran.
+	// The stream path carries what a streamed write carries: the visibility
+	// (applied WITH the write, as put() applies it), the content type and
+	// the length. Cache and disposition metadata go through put().
 	const streamable =
-		write.visibility === undefined &&
-		write.cacheControl === undefined &&
-		write.contentDisposition === undefined;
+		write.cacheControl === undefined && write.contentDisposition === undefined;
 	if (moveAs === "stream" && streamable) {
 		await disk.putStream(normalized, file.stream(), {
+			visibility: write.visibility,
 			contentType: write.contentType,
 			contentLength: file.size,
 		});

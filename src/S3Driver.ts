@@ -141,18 +141,11 @@ export class S3Driver implements StorageDriver {
 		// actually takes effect. content-* metadata headers are kept
 		// UNSIGNED — undici may rewrite them for Buffer bodies, which
 		// would break a signed value.
-		const extraHeaders: Record<string, string> | undefined =
-			options?.visibility !== undefined
-				? {
-						"x-amz-acl":
-							options.visibility === "public" ? "public-read" : "private",
-					}
-				: undefined;
 		const signed = this.#signRequest({
 			method: "PUT",
 			key: filePath,
 			body,
-			extraHeaders,
+			extraHeaders: aclHeaders(options?.visibility),
 		});
 		const headers = { ...signed, ...unsignedMetadataHeaders(options) };
 
@@ -174,7 +167,10 @@ export class S3Driver implements StorageDriver {
 		readable: NodeJS.ReadableStream,
 		options?: PutStreamOptions,
 	): Promise<void> {
-		const { contentType, contentLength } = options ?? {};
+		const { contentType, contentLength, visibility } = options ?? {};
+		// The ACL travels with the upload, on both paths, as put() sends it
+		// (flydrive's `#getSaveOptions`): a streamed write used to drop it.
+		const extraHeaders = aclHeaders(visibility);
 		// Small-file fast path: known length ≤ 5 MiB → buffer & single PUT.
 		if (
 			contentLength !== undefined &&
@@ -182,7 +178,12 @@ export class S3Driver implements StorageDriver {
 		) {
 			const body = await collectToBuffer(readable, contentLength);
 			const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}`;
-			const signed = this.#signRequest({ method: "PUT", key: filePath, body });
+			const signed = this.#signRequest({
+				method: "PUT",
+				key: filePath,
+				body,
+				extraHeaders,
+			});
 			// content-type kept UNSIGNED — undici may rewrite it for
 			// non-Buffer bodies, which would invalidate a signed value.
 			const headers: Record<string, string> = contentType
@@ -211,10 +212,14 @@ export class S3Driver implements StorageDriver {
 		const iterator = chunks[Symbol.asyncIterator]();
 		const firstChunk = await iterator.next();
 		if (firstChunk.done) {
-			await this.put(filePath, Buffer.alloc(0));
+			await this.put(filePath, Buffer.alloc(0), { visibility });
 			return;
 		}
-		const uploadId = await this.#initiateMultipartUpload(filePath, contentType);
+		const uploadId = await this.#initiateMultipartUpload(
+			filePath,
+			contentType,
+			extraHeaders,
+		);
 		const parts: Array<{ partNumber: number; etag: string }> = [];
 		try {
 			let partNumber = 1;
@@ -559,13 +564,20 @@ export class S3Driver implements StorageDriver {
 	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(to)}`;
 		const copySource = `/${this.#config.bucket}/${s3EncodeKey(from)}`;
+		// The copy takes the source's visibility when none is asked for, as
+		// flydrive's S3 driver does: CopyObject does not carry an ACL, so a
+		// public source gave a private copy (and `move()`, a copy then a
+		// delete, made a public object private). Only a PUBLIC source adds a
+		// header: without one the copy is private already, and a bucket with
+		// ACLs disabled refuses any ACL header — a private source must keep
+		// copying there.
+		const visibility =
+			options?.visibility ??
+			((await this.getVisibility(from)) === "public" ? "public" : undefined);
 		const extraHeaders: Record<string, string> = {
 			"x-amz-copy-source": copySource,
+			...aclHeaders(visibility),
 		};
-		if (options?.visibility !== undefined) {
-			extraHeaders["x-amz-acl"] =
-				options.visibility === "public" ? "public-read" : "private";
-		}
 		const headers = this.#signRequest({
 			method: "PUT",
 			key: to,
@@ -607,6 +619,9 @@ export class S3Driver implements StorageDriver {
 	}
 
 	async deleteAll(given: string): Promise<void> {
+		// NAMED DEVIATION (stricter than flydrive's S3 driver, which lists
+		// with the prefix as given): a directory prefix, so `users/1` never
+		// reaches `users/10/…`. See `normalizePrefix`.
 		const prefix = normalizePrefix(given);
 		// List one page at a time and batch-delete (up to 1000 keys per
 		// DeleteObjects call) until the bucket is drained of the prefix.
@@ -693,13 +708,8 @@ export class S3Driver implements StorageDriver {
 		options?: ListAllOptions,
 	): Promise<ListAllResult> {
 		const recursive = options?.recursive ?? false;
-		const prefix = normalizePrefix(given);
-		const normalizedPrefix =
-			prefix === ""
-				? ""
-				: !recursive && !prefix.endsWith("/")
-					? `${prefix}/`
-					: prefix;
+		// A directory prefix (`users/1/`), or `""` for the root.
+		const normalizedPrefix = normalizePrefix(given);
 		const qp: Array<[string, string]> = [
 			["list-type", "2"],
 			["prefix", normalizedPrefix],
@@ -920,13 +930,16 @@ export class S3Driver implements StorageDriver {
 	/** Initiate a multipart upload. Returns the server-assigned UploadId. */
 	async #initiateMultipartUpload(
 		filePath: string,
-		contentType?: string,
+		contentType: string | undefined,
+		extraHeaders: Record<string, string> | undefined,
 	): Promise<string> {
 		const url = `${this.#endpoint}/${this.#config.bucket}/${s3EncodeKey(filePath)}?uploads`;
+		// The ACL of a multipart upload is set when it is initiated.
 		const signed = this.#signRequest({
 			method: "POST",
 			key: filePath,
 			queryParams: [["uploads", ""]],
+			extraHeaders,
 		});
 		const headers: Record<string, string> = contentType
 			? { ...signed, "content-type": contentType }
@@ -1082,6 +1095,17 @@ function amzDateNow(): string {
  * Kept unsigned because undici may rewrite them for Buffer bodies, which
  * would invalidate a signed value (`x-amz-acl` is signed separately).
  */
+/**
+ * The signed `x-amz-acl` header a write carries for `visibility`, or none
+ * when the write asks for none (the bucket's default then applies).
+ */
+function aclHeaders(
+	visibility: Visibility | undefined,
+): Record<string, string> | undefined {
+	if (visibility === undefined) return undefined;
+	return { "x-amz-acl": visibility === "public" ? "public-read" : "private" };
+}
+
 function unsignedMetadataHeaders(
 	options: WriteOptions | undefined,
 ): Record<string, string> {

@@ -14,12 +14,10 @@ const KEY = "a-signing-key-of-32-bytes-aaaaaa";
 /** The `sig` a URL carries, recomputed under `key`. */
 function signatureUnder(key: string, url: string): string {
 	const parsed = new URL(url, "http://local");
-	const filePath = decodeURIComponent(parsed.pathname).replace(
-		/^\/[^/]+\//,
-		"",
-	);
+	// The served path is signed, the disk's base path included.
+	const servedPath = decodeURIComponent(parsed.pathname);
 	return createHmac("sha256", key)
-		.update(`${filePath}\n${parsed.searchParams.get("exp") ?? ""}`)
+		.update(`${servedPath}\n${parsed.searchParams.get("exp") ?? ""}`)
 		.digest("hex");
 }
 
@@ -86,7 +84,11 @@ describe("LocalDriver > signingSecret given as a Secret", () => {
 		const drive = new DriveManager({
 			default: "fs",
 			services: {
-				fs: services.fs({ location: root, signingSecret: new Secret(KEY) }),
+				fs: services.fs({
+					visibility: "public",
+					location: root,
+					signingSecret: new Secret(KEY),
+				}),
 			},
 		});
 		const url = await drive.use().getSignedUrl("cat.txt");

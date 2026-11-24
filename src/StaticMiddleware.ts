@@ -16,7 +16,11 @@ import * as path from "node:path";
 import { Readable } from "node:stream";
 import { E_ARCHIVE_INVALID_STATIC_PREFIX } from "./errors.js";
 import { matchesIfNoneMatch, statTag } from "./etag.js";
-import { DEFAULT_EXTENSIONS, inferMimeType } from "./mime-types.js";
+import {
+	contentTypeHeader,
+	DEFAULT_EXTENSIONS,
+	inferMimeType,
+} from "./mime-types.js";
 import { VISIBILITY_SIDECAR_SUFFIX } from "./StorageManager.js";
 
 /**
@@ -68,6 +72,24 @@ export interface StaticConfig {
 	maxAge?: number;
 	/** File extensions to serve (default: common web assets). */
 	extensions?: string[];
+	/**
+	 * A request whose path has a segment starting with `.` (`.env`,
+	 * `.vite/manifest.json`, `%2Edeploy.json` once decoded): `'ignore'` (the
+	 * default) passes it to the next middleware, `'deny'` answers 403,
+	 * `'allow'` serves it like any other file. The option and default of
+	 * upstream's static server (`dotFiles`).
+	 */
+	dotFiles?: DotFilesPolicy;
+}
+
+/** How a request for a dot-file is answered. */
+export type DotFilesPolicy = "allow" | "deny" | "ignore";
+
+/** Whether a decoded path has a segment that starts with a dot. */
+function hasDotSegment(decoded: string): boolean {
+	return decoded
+		.split("/")
+		.some((segment) => segment.length > 1 && segment.startsWith("."));
 }
 
 /**
@@ -168,6 +190,7 @@ export class StaticMiddleware {
 	#prefix: string;
 	#maxAge: number;
 	#extensions: Set<string>;
+	#dotFiles: DotFilesPolicy;
 
 	constructor(config: StaticConfig) {
 		const prefix = config.prefix ?? "/static";
@@ -185,6 +208,7 @@ export class StaticMiddleware {
 		this.#prefix = prefix;
 		this.#maxAge = config.maxAge ?? 0;
 		this.#extensions = new Set(config.extensions ?? DEFAULT_EXTENSIONS);
+		this.#dotFiles = config.dotFiles ?? "ignore";
 	}
 
 	async handle(
@@ -216,6 +240,17 @@ export class StaticMiddleware {
 			reqPath.slice(this.#prefix.length) || "/index.html",
 		);
 		if (relativePath === undefined) return next();
+
+		// Hidden files — a build manifest, an editor's settings, a tool's
+		// dot-config — are not served unless asked for. Checked on the DECODED
+		// path, so `%2Edeploy.json` is caught too. A refusal under `deny` is
+		// answered rather than passed on, so what the router answers next
+		// cannot tell whether the file exists.
+		if (this.#dotFiles !== "allow" && hasDotSegment(relativePath)) {
+			if (this.#dotFiles === "ignore") return next();
+			ctx.response.status(403);
+			return;
+		}
 
 		// Visibility sidecars are an implementation detail of LocalDriver
 		// — never serve them, even if the static root happens to overlap
@@ -278,8 +313,9 @@ export class StaticMiddleware {
 			return;
 		}
 
-		const mime = inferMimeType(ext);
-		ctx.response.header("Content-Type", mime);
+		// With its charset for a text type, as upstream's static server sends
+		// it: without one the browser guesses the encoding of the file.
+		ctx.response.header("Content-Type", contentTypeHeader(inferMimeType(ext)));
 		ctx.response.header("Content-Length", String(stat.size));
 		ctx.response.header("Cache-Control", `public, max-age=${this.#maxAge}`);
 		ctx.response.header("ETag", etag);

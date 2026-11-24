@@ -55,7 +55,10 @@ describe("S3Driver", () => {
 			accessKeyId: "AKIATEST",
 			secretAccessKey: "secret",
 		});
-		fetchSpy = vi.spyOn(globalThis, "fetch");
+		// An unmocked call fails rather than reaching the real provider.
+		fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockRejectedValue(new Error("unmocked network call"));
 	});
 
 	afterEach(() => {
@@ -472,14 +475,41 @@ describe("S3Driver", () => {
 
 	describe("copy / move / list", () => {
 		it("copy issues PUT with signed x-amz-copy-source header", async () => {
+			// The source's ACL first (private: no ACL header), then the copy.
+			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
 			await driver.copy("src/a.txt", "dst/b.txt");
-			const [url, init] = fetchSpy.mock.calls[0] ?? [];
+			expect(String(fetchSpy.mock.calls[0]?.[0])).toContain("src/a.txt?acl");
+			const [url, init] = fetchSpy.mock.calls[1] ?? [];
 			expect(String(url)).toContain("/my-bucket/dst/b.txt");
 			expect((init as RequestInit).method).toBe("PUT");
 			const headers = (init as RequestInit).headers as Record<string, string>;
 			expect(headers["x-amz-copy-source"]).toBe("/my-bucket/src/a.txt");
 			expect(headers.authorization).toMatch(/^AWS4-HMAC-SHA256 /);
+			expect(headers["x-amz-acl"]).toBeUndefined();
+		});
+
+		it("copy carries a public source's ACL, signed", async () => {
+			fetchSpy.mockResolvedValueOnce(
+				new Response(
+					"<AccessControlList><Grant><Grantee><URI>http://acs.amazonaws.com/groups/global/AllUsers</URI></Grantee><Permission>READ</Permission></Grant></AccessControlList>",
+					{ status: 200 },
+				),
+			);
+			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+			await driver.copy("a.txt", "b.txt");
+			const headers = fetchSpy.mock.calls[1]?.[1]?.headers;
+			expect(headers).toMatchObject({ "x-amz-acl": "public-read" });
+			expect(JSON.stringify(headers)).toMatch(/SignedHeaders=[^,]*x-amz-acl/);
+		});
+
+		it("copy with an explicit visibility sends it without reading the source's", async () => {
+			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+			await driver.copy("a.txt", "b.txt", { visibility: "private" });
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+			expect(fetchSpy.mock.calls[0]?.[1]?.headers).toMatchObject({
+				"x-amz-acl": "private",
+			});
 		});
 
 		it("copy throws E_ARCHIVE_NOT_FOUND when the source is reported as NoSuchKey", async () => {
@@ -491,9 +521,19 @@ describe("S3Driver", () => {
 			await expect(driver.copy("nope", "dst")).rejects.toMatchObject({
 				code: "E_ARCHIVE_NOT_FOUND",
 			});
+			// The copy itself saying so, when no source ACL is read first.
+			fetchSpy.mockResolvedValueOnce(
+				new Response("<Error><Code>NoSuchKey</Code></Error>", {
+					status: 404,
+				}),
+			);
+			await expect(
+				driver.copy("nope", "dst", { visibility: "public" }),
+			).rejects.toMatchObject({ code: "E_ARCHIVE_NOT_FOUND" });
 		});
 
 		it("copy reports a 200 that carries an <Error> body as a remote failure", async () => {
+			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
 			fetchSpy.mockResolvedValueOnce(
 				new Response("<Error><Code>InternalError</Code></Error>", {
 					status: 200,
@@ -575,7 +615,10 @@ describe("S3Driver > listing a prefix as a page", () => {
 			accessKeyId: "AKIATEST",
 			secretAccessKey: "secret",
 		});
-		fetchSpy = vi.spyOn(globalThis, "fetch");
+		// An unmocked call fails rather than reaching the real provider.
+		fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockRejectedValue(new Error("unmocked network call"));
 	});
 
 	afterEach(() => {
@@ -705,7 +748,10 @@ describe("S3Driver > deleting a whole prefix", () => {
 			accessKeyId: "AKIATEST",
 			secretAccessKey: "secret",
 		});
-		fetchSpy = vi.spyOn(globalThis, "fetch");
+		// An unmocked call fails rather than reaching the real provider.
+		fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockRejectedValue(new Error("unmocked network call"));
 	});
 
 	afterEach(() => {
@@ -847,7 +893,10 @@ describe("S3Driver > move and getBytes", () => {
 			accessKeyId: "AKIATEST",
 			secretAccessKey: "secret",
 		});
-		fetchSpy = vi.spyOn(globalThis, "fetch");
+		// An unmocked call fails rather than reaching the real provider.
+		fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockRejectedValue(new Error("unmocked network call"));
 	});
 
 	afterEach(() => {
@@ -855,21 +904,24 @@ describe("S3Driver > move and getBytes", () => {
 	});
 
 	it("move copies then deletes the source", async () => {
-		fetchSpy.mockResolvedValue(new Response("", { status: 200 }));
+		fetchSpy.mockImplementation(async () => new Response("", { status: 200 }));
 
 		await driver.move("a.txt", "b.txt");
 
-		expect(fetchSpy).toHaveBeenCalledTimes(2);
-		expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({ method: "PUT" });
-		expect(fetchSpy.mock.calls[1]?.[1]).toMatchObject({ method: "DELETE" });
+		// The source's ACL, the copy, the delete.
+		expect(fetchSpy).toHaveBeenCalledTimes(3);
+		expect(fetchSpy.mock.calls[0]?.[1]).toMatchObject({ method: "GET" });
+		expect(fetchSpy.mock.calls[1]?.[1]).toMatchObject({ method: "PUT" });
+		expect(fetchSpy.mock.calls[2]?.[1]).toMatchObject({ method: "DELETE" });
 	});
 
 	it("leaves the source in place when the copy failed", async () => {
 		// Deleting after a failed copy loses the object outright.
+		fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
 		fetchSpy.mockResolvedValueOnce(new Response("denied", { status: 403 }));
 
 		await expect(driver.move("a.txt", "b.txt")).rejects.toThrow();
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(fetchSpy).toHaveBeenCalledTimes(2);
 	});
 
 	it("getBytes returns the body as bytes", async () => {
@@ -900,7 +952,10 @@ describe("S3Driver > the last of the surface", () => {
 			accessKeyId: "AKIATEST",
 			secretAccessKey: "secret",
 		});
-		fetchSpy = vi.spyOn(globalThis, "fetch");
+		// An unmocked call fails rather than reaching the real provider.
+		fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockRejectedValue(new Error("unmocked network call"));
 	});
 
 	afterEach(() => {

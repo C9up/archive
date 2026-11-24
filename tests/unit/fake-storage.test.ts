@@ -107,14 +107,13 @@ describe("FakeStorage", () => {
 		);
 	});
 
-	it("copy duplicates content and takes default visibility", async () => {
+	it("copy duplicates content and carries the source's visibility", async () => {
 		await storage.put("src.txt", "payload");
 		await storage.setVisibility("src.txt", "private");
 		await storage.copy("src.txt", "dst.txt");
 		expect((await storage.get("dst.txt"))?.toString("utf8")).toBe("payload");
-		// Source still private, but copy defaults to public.
 		expect((await storage.getMetadata("src.txt")).visibility).toBe("private");
-		expect((await storage.getMetadata("dst.txt")).visibility).toBe("public");
+		expect((await storage.getMetadata("dst.txt")).visibility).toBe("private");
 	});
 
 	it("copy throws E_ARCHIVE_NOT_FOUND when source is missing", async () => {

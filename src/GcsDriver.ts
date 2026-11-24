@@ -219,6 +219,20 @@ export class GcsDriver implements StorageDriver {
 		readable: NodeJS.ReadableStream,
 		options?: PutStreamOptions,
 	): Promise<void> {
+		await this.#upload(filePath, readable, options);
+		// Applied after the upload, as put() applies it (flydrive sends it
+		// with the write): a streamed write used to drop it.
+		if (options?.visibility !== undefined) {
+			await this.setVisibility(filePath, options.visibility);
+		}
+	}
+
+	/** The bytes of {@link putStream}: one media upload, or a resumable one. */
+	async #upload(
+		filePath: string,
+		readable: NodeJS.ReadableStream,
+		options: PutStreamOptions | undefined,
+	): Promise<void> {
 		const name = gcsEncodeObjectName(filePath);
 		const mime =
 			options?.contentType ??
@@ -443,6 +457,31 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async getMetadata(filePath: string): Promise<Metadata> {
+		const json = await this.#objectResource(filePath);
+		const size = Number.parseInt(text(json, "size") ?? "0", 10);
+		const mimeType = text(json, "contentType") ?? "application/octet-stream";
+		const updated = text(json, "updated");
+		return {
+			size,
+			contentLength: size,
+			mimeType,
+			contentType: mimeType,
+			lastModified: updated ? new Date(updated) : new Date(0),
+			etag: (text(json, "etag") ?? "").replace(/^(W\/)?"(.*)"$/, "$1$2"),
+			visibility: aclVisibility(json) ?? "private",
+		};
+	}
+
+	/**
+	 * The visibility an object's ACL states, or `undefined` when the resource
+	 * carries no ACL to read.
+	 */
+	async #aclVisibility(filePath: string): Promise<Visibility | undefined> {
+		return aclVisibility(await this.#objectResource(filePath));
+	}
+
+	/** The object's resource (`objects.get`). Throws when it is absent. */
+	async #objectResource(filePath: string): Promise<Record<string, unknown>> {
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(filePath)}`;
 		const token = await this.#getAccessToken();
 		const res = await this.#fetch(url, {
@@ -463,28 +502,7 @@ export class GcsDriver implements StorageDriver {
 				`GCS HEAD failed (${res.status}): ${await res.text()}`,
 			);
 		}
-		const json = await jsonObject(res, "an object metadata request");
-		// Public only on an explicit allUsers grant: an ACL that is missing or
-		// shaped unexpectedly reads as private.
-		const visibility: Visibility = records(json, "acl").some(
-			(grant) =>
-				text(grant, "entity") === "allUsers" &&
-				(text(grant, "role") === "READER" || text(grant, "role") === "OWNER"),
-		)
-			? "public"
-			: "private";
-		const size = Number.parseInt(text(json, "size") ?? "0", 10);
-		const mimeType = text(json, "contentType") ?? "application/octet-stream";
-		const updated = text(json, "updated");
-		return {
-			size,
-			contentLength: size,
-			mimeType,
-			contentType: mimeType,
-			lastModified: updated ? new Date(updated) : new Date(0),
-			etag: (text(json, "etag") ?? "").replace(/^(W\/)?"(.*)"$/, "$1$2"),
-			visibility,
-		};
+		return jsonObject(res, "an object metadata request");
 	}
 
 	async getVisibility(filePath: string): Promise<Visibility> {
@@ -525,6 +543,11 @@ export class GcsDriver implements StorageDriver {
 	}
 
 	async copy(from: string, to: string, options?: WriteOptions): Promise<void> {
+		// Read before the copy: the source of a move is gone afterwards.
+		const sourceVisibility =
+			options?.visibility === undefined
+				? await this.#aclVisibility(from)
+				: undefined;
 		const url = `${GCS_META_ROOT}/b/${this.#config.bucket}/o/${gcsEncodeObjectName(from)}/copyTo/b/${this.#config.bucket}/o/${gcsEncodeObjectName(to)}`;
 		const token = await this.#getAccessToken();
 		const res = await this.#fetch(url, {
@@ -545,8 +568,12 @@ export class GcsDriver implements StorageDriver {
 				`GCS COPY failed (${res.status}): ${await res.text()}`,
 			);
 		}
-		if (options?.visibility !== undefined) {
-			await this.setVisibility(to, options.visibility);
+		// The copy takes the source's visibility when none is asked for, as
+		// flydrive's GCS driver does. `undefined` (no ACL to read, as on a
+		// bucket with uniform access) leaves the bucket's policy in charge.
+		const visibility = options?.visibility ?? sourceVisibility;
+		if (visibility !== undefined) {
+			await this.setVisibility(to, visibility);
 		}
 	}
 
@@ -574,13 +601,8 @@ export class GcsDriver implements StorageDriver {
 		options?: ListAllOptions,
 	): Promise<ListAllResult> {
 		const recursive = options?.recursive ?? false;
-		const prefix = normalizePrefix(given);
-		const normalizedPrefix =
-			prefix === ""
-				? ""
-				: !recursive && !prefix.endsWith("/")
-					? `${prefix}/`
-					: prefix;
+		// A directory prefix (`users/1/`), or `""` for the root.
+		const normalizedPrefix = normalizePrefix(given);
 		const params = new URLSearchParams({ prefix: normalizedPrefix });
 		if (!recursive) params.set("delimiter", "/");
 		if (options?.paginationToken) {
@@ -852,6 +874,24 @@ function records(
 ): Record<string, unknown>[] {
 	const value = record[key];
 	return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+/**
+ * The visibility an object resource's ACL states: public only on an explicit
+ * allUsers grant, so an ACL shaped unexpectedly reads as private. `undefined`
+ * when the resource carries no `acl` array at all.
+ */
+function aclVisibility(
+	resource: Record<string, unknown>,
+): Visibility | undefined {
+	if (!Array.isArray(resource.acl)) return undefined;
+	return records(resource, "acl").some(
+		(grant) =>
+			text(grant, "entity") === "allUsers" &&
+			(text(grant, "role") === "READER" || text(grant, "role") === "OWNER"),
+	)
+		? "public"
+		: "private";
 }
 
 /** The string entries of an array field; anything else is left out. */

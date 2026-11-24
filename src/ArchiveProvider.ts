@@ -41,6 +41,7 @@ import {
 	type SignedUrlOptions,
 	type StorageDriver,
 	StorageManager,
+	type Visibility,
 } from "./StorageManager.js";
 import {
 	clearStorage,
@@ -67,7 +68,7 @@ export interface ArchiveAppContext {
  * Legacy single-disk config shape (pre-parity). Still accepted: the
  * provider wraps it in a one-service DriveManager under the disk name
  * `default`. New apps should use the AdonisJS-parity {@link DriveConfig}
- * (`{ default, services, fakes }`) built with `defineConfig` + `services.*`.
+ * (`{ default, services }`) built with `defineConfig` + `services.*`.
  */
 export interface ArchiveConfig {
 	driver: "local" | "s3" | "gcs";
@@ -75,6 +76,8 @@ export interface ArchiveConfig {
 		root: string;
 		signingSecret?: string | ReleasableSecret;
 		routeBasePath?: string;
+		/** The disk's visibility (default `'public'`), as on `services.fs`. */
+		visibility?: Visibility;
 	};
 	s3?: S3Config;
 	gcs?: GcsConfig;
@@ -280,7 +283,7 @@ function isDriveConfig(config: unknown): config is DriveConfig {
 
 /**
  * Reconcile whatever shape the app configured into a {@link DriveConfig}:
- *   - `{ default, services, fakes }` → used as-is (parity path).
+ *   - `{ default, services }` → used as-is (parity path).
  *   - legacy `{ driver, local, s3, gcs }` → wrapped as one `default` disk.
  *   - unset → the built-in local default.
  */
@@ -327,6 +330,7 @@ function buildDriver(config: ArchiveConfig): StorageDriver {
 		return new LocalDriver(root, {
 			signingSecret: config.local?.signingSecret,
 			routeBasePath: config.local?.routeBasePath,
+			visibility: config.local?.visibility,
 		});
 	}
 	// Reject unknown driver values explicitly so a typo like

@@ -7,9 +7,10 @@
  * `E_ARCHIVE_EXPIRED_SIGNATURE`. A valid signature for a file that is not
  * stored → 404 `E_ARCHIVE_NOT_FOUND`. Any other failure to serve a file is
  * thrown as `E_CANNOT_SERVE_FILE`, the failure as its `cause`.
- * No signature at all → the file's visibility decides: a public file is
- * served, a private one refused with 403 `E_ARCHIVE_ACCESS_DENIED`, and a
- * name that is not stored falls through to `next()`.
+ * No signature at all → a public file is served; anything else — a private
+ * file, a name that is not stored, every request on a private disk — gets
+ * the same 403 `E_ARCHIVE_ACCESS_DENIED`, so an unsigned request cannot tell
+ * a private file from an absent one.
  *
  * @implements Story 43.2 AC 5
  */
@@ -27,8 +28,10 @@ import {
 	HEADER_OVERRIDES,
 	type HeaderOverride,
 	isHeaderValue,
+	servedPath,
 	signedPayload,
 } from "./local-signature.js";
+import { contentTypeHeader } from "./mime-types.js";
 import type {
 	LocalDriver,
 	Metadata,
@@ -114,6 +117,7 @@ export function createSignedRouteHandler(
 		]);
 	}
 	const storage = options.storage;
+	const diskVisibility = options.driver.getDiskVisibility();
 
 	return async (ctx, next) => {
 		if (ctx.request.method() !== "GET" && ctx.request.method() !== "HEAD") {
@@ -157,17 +161,22 @@ export function createSignedRouteHandler(
 		// Ream's `Request.qs()` contract (`Record<string, unknown>`).
 		const qs = readQueryObject(ctx);
 		if (qs.exp === undefined && qs.sig === undefined) {
-			// No signature: this route still owns the prefix. Handing every
-			// unsigned request on to `next()` let whatever was mounted behind —
-			// a static server over the storage root, the obvious companion —
-			// serve a PRIVATE file to anyone who left the query off. Visibility
-			// is decided here: a public file is served, a private one refused,
-			// and only a name that is not stored goes on to the next handler.
+			// No signature: this route owns the prefix. Handing an unsigned
+			// request on to `next()` let whatever was mounted behind — a static
+			// server over the storage root, the obvious companion — serve a
+			// PRIVATE file to anyone who left the query off.
+			//
+			// A private disk refuses before it looks at the file, as upstream
+			// does. On a public disk only a stored public file is served, and a
+			// private file and an absent name get the SAME answer: a 403 for
+			// one and a fall-through (the application's 404) for the other told
+			// anyone which private keys are stored.
 			//
 			// NAMED DEVIATION: upstream answers this refusal with 401. It is a
 			// 403 here, as every other refusal of this route already was: no
 			// credential the client could add makes a private file servable
 			// without a signature.
+			if (diskVisibility === "private") return accessDenied(ctx);
 			let visibility: "public" | "private" | undefined;
 			try {
 				if (await storage.exists(filePath)) {
@@ -182,13 +191,7 @@ export function createSignedRouteHandler(
 				}
 				throw err;
 			}
-			if (visibility === undefined) return next();
-			if (visibility !== "public") {
-				ctx.response.status(403).json({
-					error: { code: "E_ARCHIVE_ACCESS_DENIED", message: "Access denied" },
-				});
-				return;
-			}
+			if (visibility !== "public") return accessDenied(ctx);
 			return serve(ctx, filePath);
 		}
 		const expRaw = readStringParam(qs, "exp");
@@ -258,8 +261,10 @@ export function createSignedRouteHandler(
 		// cannot throw on a length mismatch here. Run BEFORE the expiry
 		// check so the response time cannot leak whether a sig was valid
 		// for an expired URL versus invalid for a fresh one.
+		// Over the path as served, this disk's base path included: a URL
+		// signed by another disk sharing the secret does not verify here.
 		const expected = createHmac("sha256", secret)
-			.update(signedPayload(filePath, exp, overrides))
+			.update(signedPayload(servedPath(prefix, filePath), exp, overrides))
 			.digest();
 		const provided = Buffer.from(sigHex, "hex");
 		if (!timingSafeEqual(provided, expected)) {
@@ -303,8 +308,15 @@ export function createSignedRouteHandler(
 		}
 		ctx.response.header("ETag", metadata.etag);
 		ctx.response.header("Last-Modified", metadata.lastModified.toUTCString());
-		ctx.response.header("Content-Type", metadata.contentType);
-		// Signed overrides win over what the extension implies.
+		// With its charset for a text type, as upstream's `response.type()`
+		// sends it: without one the browser picks the encoding of a stored
+		// file, and the file's author picks it for the browser.
+		ctx.response.header(
+			"Content-Type",
+			contentTypeHeader(metadata.contentType),
+		);
+		// Signed overrides win over what the extension implies, sent exactly
+		// as signed.
 		for (const [param, value] of overrides) {
 			const header = HEADER_OVERRIDES.find(([name]) => name === param)?.[1];
 			if (header !== undefined) ctx.response.header(header, value);
@@ -361,6 +373,13 @@ function notFound(ctx: SignedRouteHttpContext): void {
 	});
 }
 
+/** The one refusal of an unsigned request that is not for a public file. */
+function accessDenied(ctx: SignedRouteHttpContext): void {
+	ctx.response.status(403).json({
+		error: { code: "E_ARCHIVE_ACCESS_DENIED", message: "Access denied" },
+	});
+}
+
 function invalidKey(ctx: SignedRouteHttpContext): void {
 	ctx.response.status(403).json({
 		error: { code: "E_ARCHIVE_INVALID_KEY", message: "Invalid path" },
@@ -371,7 +390,7 @@ function invalidKey(ctx: SignedRouteHttpContext): void {
  * Read the parsed query object from the HttpContext. Matches Ream's
  * `Request.qs()` contract (object). Returns an empty object when the
  * adapter does not expose `qs()` — in that rare case every request
- * will fall through to `next()`, which is the safe behaviour.
+ * reads as unsigned: only a stored public file is served.
  */
 function readQueryObject(ctx: SignedRouteHttpContext): Record<string, unknown> {
 	if (typeof ctx.request.qs === "function") {

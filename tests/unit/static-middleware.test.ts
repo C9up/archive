@@ -109,7 +109,10 @@ describe("StaticMiddleware", () => {
 		await middleware.handle(ctx, next);
 
 		expect(next).not.toHaveBeenCalled();
-		expect(response.header).toHaveBeenCalledWith("Content-Type", "text/plain");
+		expect(response.header).toHaveBeenCalledWith(
+			"Content-Type",
+			"text/plain; charset=utf-8",
+		);
 		expect(response.header).toHaveBeenCalledWith(
 			"Cache-Control",
 			expect.stringMatching(/^public, max-age=/),

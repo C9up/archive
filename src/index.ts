@@ -32,6 +32,7 @@ export type { FileSnapshot } from "./objects.js";
 export { DriveDirectory, DriveFile } from "./objects.js";
 export { type S3Config, S3Driver } from "./S3Driver.js";
 export {
+	type DotFilesPolicy,
 	type StaticConfig,
 	StaticMiddleware,
 	type StaticMiddlewareHttpContext,
@@ -67,7 +68,7 @@ import type { DriveConfig } from "./DriveManager.js";
  * `defineConfig` parity. Identity at runtime; the generic preserves
  * literal types for inference.
  *
- * Accepts the multi-disk shape `{ default, services, fakes }` (build the
+ * Accepts the multi-disk shape `{ default, services }` (build the
  * services with the `services.*` helpers) or the legacy single-disk
  * `{ driver, local, s3, gcs }` shape.
  */

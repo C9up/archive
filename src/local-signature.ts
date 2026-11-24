@@ -2,12 +2,17 @@
  * What a local signed URL signs, shared by the driver that builds the URL and
  * the route that verifies it, so the two cannot drift apart.
  *
- * The payload is `<key>\n<exp>`, followed — only when the URL carries
- * response-header overrides — by `\n` and those overrides as an encoded query
- * string in a fixed order. A key cannot contain `\n` (the key normaliser
- * refuses control characters), `exp` is digits and the overrides line is
- * percent-encoded, so no part can pose as another. A URL signed without
- * overrides keeps the payload it always had.
+ * The payload is `<path>\n<exp>`, where `<path>` is the path the file is
+ * served under — the disk's route base path, then the key — followed, only
+ * when the URL carries response-header overrides, by `\n` and those overrides
+ * as an encoded query string in a fixed order. Neither the base path nor the
+ * key can contain `\n` (both refuse control characters and whitespace in the
+ * base path), `exp` is digits and the overrides line is percent-encoded, so no
+ * part can pose as another.
+ *
+ * The base path is signed so that a URL signed by one disk is refused by
+ * another one sharing its secret (the documented `APP_KEY`), as upstream
+ * signs the whole route URL.
  */
 
 import { E_ARCHIVE_INVALID_HEADER_VALUE } from "./errors.js";
@@ -53,13 +58,18 @@ export function requestedOverrides(options: {
 	return overrides;
 }
 
-/** The HMAC input for a key, an expiry and its overrides. */
+/** The path a key is served under: the route base path, then the key. */
+export function servedPath(routeBasePath: string, key: string): string {
+	return `${routeBasePath}/${key}`;
+}
+
+/** The HMAC input for a served path, an expiry and its overrides. */
 export function signedPayload(
-	key: string,
+	path: string,
 	exp: number,
 	overrides: readonly HeaderOverride[],
 ): string {
-	const base = `${key}\n${exp}`;
+	const base = `${path}\n${exp}`;
 	if (overrides.length === 0) return base;
 	return `${base}\n${overrideQuery(overrides)}`;
 }

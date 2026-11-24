@@ -189,14 +189,53 @@ describe("archive > the local disk", () => {
 	});
 
 	describe("copying a file", () => {
-		it("does not carry the source's visibility", async () => {
+		it("carries the source's visibility", async () => {
 			await driver.put("a.txt", Buffer.from("x"));
 			await driver.setVisibility("a.txt", "private");
+			await driver.put("p.txt", Buffer.from("y"), { visibility: "public" });
 
 			await driver.copy("a.txt", "b.txt");
+			await driver.copy("p.txt", "q.txt");
 
-			// A copy is a new object: it takes the default unless asked.
+			// Copying a private file never yields a public one.
+			expect(await driver.getVisibility("b.txt")).toBe("private");
+			expect(await driver.getVisibility("q.txt")).toBe("public");
+		});
+
+		it("lets an explicit visibility win over the source's", async () => {
+			await driver.put("a.txt", Buffer.from("x"), { visibility: "private" });
+
+			await driver.copy("a.txt", "b.txt", { visibility: "public" });
+
+			expect(await driver.getVisibility("a.txt")).toBe("private");
 			expect(await driver.getVisibility("b.txt")).toBe("public");
+		});
+
+		it("refuses a source whose marker is damaged before writing anything", async () => {
+			await driver.put("a.txt", Buffer.from("x"));
+			fs.writeFileSync(path.join(root, "a.txt.archive-visibility.json"), "{");
+
+			await expect(driver.copy("a.txt", "b.txt")).rejects.toMatchObject({
+				code: "E_ARCHIVE_VISIBILITY_CORRUPT",
+			});
+			expect(await driver.exists("b.txt")).toBe(false);
+		});
+
+		it("copies a file onto itself without emptying it", async () => {
+			await driver.put("a.txt", Buffer.from("keep me"));
+
+			await driver.copy("a.txt", "a.txt");
+
+			expect((await driver.get("a.txt"))?.toString()).toBe("keep me");
+		});
+
+		it("copies a file larger than one read", async () => {
+			const big = Buffer.alloc(200 * 1024, 7);
+			await driver.put("big.bin", big);
+
+			await driver.copy("big.bin", "copy.bin");
+
+			expect((await driver.get("copy.bin"))?.equals(big)).toBe(true);
 		});
 
 		it("takes an explicit visibility", async () => {

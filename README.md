@@ -36,8 +36,11 @@ await disk.setVisibility('avatars/1.png', 'public')
 const visibility = await disk.getVisibility('invoices/42.pdf') // 'private'
 ```
 
-On the local disk a file with no visibility marker is `public`; a file made
-private carries a marker beside it. On S3 the visibility is the object's ACL
+A local disk has a visibility of its own, required by `services.fs()`. On a
+`'private'` disk every file is private and the signed route serves nothing
+without a signature. On a `'public'` disk a file with no visibility marker is
+public; a file made private carries a marker beside it. `copy()` and `move()`
+keep the source's visibility. On S3 the visibility is the object's ACL
 (`public-read` or `private`), and an object whose ACL cannot be read counts as
 private.
 
@@ -71,6 +74,7 @@ import env from '#start/env'
 
 export const driver = new LocalDriver('storage/uploads', {
   signingSecret: env.get('APP_KEY'),
+  visibility: 'private',
 })
 export const uploads = new StorageManager(driver)
 export const serveUploads = createSignedRouteHandler({ storage: uploads, driver })
@@ -93,12 +97,14 @@ and leave `prefix` out. A refused request gets a JSON body
 | --- | --- | --- |
 | 403 | `E_ARCHIVE_INVALID_SIGNATURE` | The signature, its expiry or a signed header override is malformed or does not match |
 | 403 | `E_ARCHIVE_EXPIRED_SIGNATURE` | The signature is valid but its `exp` has passed |
-| 403 | `E_ARCHIVE_ACCESS_DENIED` | An unsigned request for a private file |
+| 403 | `E_ARCHIVE_ACCESS_DENIED` | An unsigned request for anything but a stored public file: a private file, a name that is not stored, any file of a private disk |
 | 403 | `E_ARCHIVE_INVALID_KEY` | The path names no key the disk will address |
 | 404 | `E_ARCHIVE_NOT_FOUND` | A valid signature for a file that is not stored |
 
-An unsigned request for a name that is not stored falls through to the next
-middleware.
+An unsigned request gets the same answer for a private file and for a name
+that is not stored. A URL signed by one disk does not open a file on another
+disk sharing its `signingSecret`: the signature covers the disk's
+`routeBasePath`.
 
 ## Static files
 
@@ -112,6 +118,9 @@ import { StaticMiddleware } from '@c9up/archive'
 const assets = new StaticMiddleware({ root: 'public', prefix: '/assets' })
 server.use([assets.handle.bind(assets)])
 ```
+
+Hidden files (a path segment starting with `.`) go on to the next middleware;
+`dotFiles: 'deny'` answers them with 403, `dotFiles: 'allow'` serves them.
 
 Point it at public assets only, never at a local disk's directory. It has no
 signature check: it refuses a file whose visibility marker says private and

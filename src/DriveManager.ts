@@ -28,6 +28,7 @@ import {
 	type ReleasableSecret,
 	type StorageDriver,
 	StorageManager,
+	type Visibility,
 } from "./StorageManager.js";
 import { FakeStorageManager } from "./testing/FakeStorage.js";
 
@@ -36,15 +37,17 @@ export type DriveServiceFactory = () => StorageDriver;
 
 /**
  * Multi-disk configuration — AdonisJS Drive `defineConfig` shape:
- * `{ default, services, fakes }`.
+ * `{ default, services }`.
+ *
+ * NAMED DEVIATION: no `fakes` key. Upstream's fake is a filesystem disk under
+ * `fakes.location`, so it needs that config; ours is in memory (see
+ * {@link DriveManager.fake}) and has nothing to configure.
  */
 export interface DriveConfig {
 	/** Name of the disk used when {@link DriveManager.use} is called with no argument. */
 	default: string;
 	/** Named disks, each a factory returning a driver (use the {@link services} helpers). */
 	services: Record<string, DriveServiceFactory>;
-	/** Optional fakes configuration (reserved; the in-memory fake needs no location). */
-	fakes?: { location?: string };
 }
 
 /** Options accepted by {@link services.fs}. */
@@ -63,6 +66,13 @@ export interface FsServiceOptions {
 	 * driver's URLs and the signed route both derive from it.
 	 */
 	routeBasePath?: string;
+	/**
+	 * The disk's visibility, required as upstream requires it: `'private'`
+	 * makes every object private (the signed route serves nothing without a
+	 * signature), `'public'` makes an object written without a visibility
+	 * public. See the LocalDriver option of the same name.
+	 */
+	visibility: Visibility;
 }
 
 /**
@@ -76,16 +86,17 @@ export interface FsServiceOptions {
  * and the signed route's prefix both derive from it.
  */
 export const services: {
-	fs(options?: FsServiceOptions): DriveServiceFactory;
+	fs(options: FsServiceOptions): DriveServiceFactory;
 	s3(config: S3Config): DriveServiceFactory;
 	gcs(config: GcsConfig): DriveServiceFactory;
 } = {
 	fs(options) {
-		const root = options?.location ?? options?.root ?? "./storage";
+		const root = options.location ?? options.root ?? "./storage";
 		return () =>
 			new LocalDriver(root, {
-				signingSecret: options?.signingSecret,
-				routeBasePath: options?.routeBasePath,
+				signingSecret: options.signingSecret,
+				routeBasePath: options.routeBasePath,
+				visibility: options.visibility,
 			});
 	},
 	s3(config) {
@@ -162,6 +173,12 @@ export class DriveManager {
 	 * Swap a disk for an in-memory {@link FakeStorageManager}. Subsequent
 	 * {@link use} calls for the same disk return the fake until
 	 * {@link restore} is called. AdonisJS Drive parity.
+	 *
+	 * NAMED DEVIATION: the fake keeps its files in memory, where flydrive's
+	 * `FakeDisk` writes them under `fakes.location/<disk>` and refuses to fake
+	 * without that config. Nothing reaches the filesystem, so parallel test
+	 * files cannot collide on one directory and nothing is left to clean up
+	 * after a crashed run.
 	 */
 	fake(service?: string): FakeStorageManager {
 		const name = service ?? this.#config.default;

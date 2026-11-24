@@ -53,10 +53,12 @@ async function boot(): Promise<Disks> {
 		default: "local",
 		services: {
 			local: services.fs({
+				visibility: "public",
 				location: disks.local,
 				signingSecret: "a".repeat(32),
 			}),
 			uploads: services.fs({
+				visibility: "public",
 				location: disks.uploads,
 				signingSecret: "b".repeat(32),
 				routeBasePath: "/uploads",
@@ -146,10 +148,15 @@ describe("MultipartFile.moveToDisk", () => {
 			fs.readFileSync(path.join(disks.uploads, "docs/me.txt"), "utf8"),
 		).toBe("secret");
 		expect(fs.existsSync(path.join(disks.local, "docs/me.txt"))).toBe(false);
-		// Through put(), so the object is never public, not even for a moment.
-		expect(putStream).not.toHaveBeenCalled();
+		// Streamed with its visibility, so the local disk marks it private
+		// before the first byte.
+		expect(putStream).toHaveBeenCalledWith(
+			"docs/me.txt",
+			expect.anything(),
+			expect.objectContaining({ visibility: "private" }),
+		);
 		const archive = new StorageManager(
-			services.fs({ location: disks.uploads })(),
+			services.fs({ visibility: "public", location: disks.uploads })(),
 		);
 		expect(await archive.getVisibility("docs/me.txt")).toBe("private");
 		expect(file.meta.url).toMatch(/^\/uploads\/docs\/me\.txt\?exp=\d+&sig=/);

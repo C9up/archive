@@ -41,7 +41,10 @@ describe("GcsDriver", () => {
 
 	beforeEach(() => {
 		driver = buildDriver();
-		fetchSpy = vi.spyOn(globalThis, "fetch");
+		// An unmocked call fails rather than reaching the real provider.
+		fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockRejectedValue(new Error("unmocked network call"));
 	});
 
 	afterEach(() => {
@@ -392,9 +395,12 @@ describe("GcsDriver", () => {
 		});
 
 		it("copy POSTs to /o/{from}/copyTo/b/{bucket}/o/{to} with Bearer auth", async () => {
+			// The source's resource first (no ACL to carry), then the copy.
+			fetchSpy.mockResolvedValueOnce(new Response("{}", { status: 200 }));
 			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
 			await driver.copy("src/a.txt", "dst/b.txt");
-			const [url, init] = fetchSpy.mock.calls[1] ?? [];
+			expect(fetchSpy).toHaveBeenCalledTimes(3);
+			const [url, init] = fetchSpy.mock.calls[2] ?? [];
 			// The JSON API addresses one object as one path segment, so the
 			// slashes inside the name are percent-encoded — left raw they
 			// address a different resource, which answers 404.
@@ -404,6 +410,32 @@ describe("GcsDriver", () => {
 			expect((init as RequestInit).method).toBe("POST");
 			const headers = (init as RequestInit).headers as Record<string, string>;
 			expect(headers.authorization).toBe("Bearer test-token");
+		});
+
+		it.each([
+			[[{ entity: "allUsers", role: "READER" }], "POST", "/acl"],
+			[[{ entity: "user-owner", role: "OWNER" }], "DELETE", "/acl/allUsers"],
+		])(
+			"copy carries the source's visibility (ACL %j)",
+			async (acl, method, path) => {
+				fetchSpy.mockResolvedValueOnce(
+					new Response(JSON.stringify({ acl }), { status: 200 }),
+				);
+				fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+				fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+				await driver.copy("a.txt", "b.txt");
+				const [url, init] = fetchSpy.mock.calls[3] ?? [];
+				expect(String(url)).toContain(`/o/b.txt${path}`);
+				expect(init?.method).toBe(method);
+			},
+		);
+
+		it("copy with an explicit visibility does not read the source's", async () => {
+			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+			fetchSpy.mockResolvedValueOnce(new Response("", { status: 200 }));
+			await driver.copy("a.txt", "b.txt", { visibility: "private" });
+			expect(String(fetchSpy.mock.calls[1]?.[0])).toContain("copyTo");
+			expect(fetchSpy.mock.calls[2]?.[1]?.method).toBe("DELETE");
 		});
 
 		it("copy 404 → E_ARCHIVE_NOT_FOUND", async () => {
@@ -490,7 +522,10 @@ describe("GcsDriver > listing, deleting a prefix, and the rest", () => {
 
 	beforeEach(() => {
 		driver = buildDriver();
-		fetchSpy = vi.spyOn(globalThis, "fetch");
+		// An unmocked call fails rather than reaching the real provider.
+		fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockRejectedValue(new Error("unmocked network call"));
 		// Every call below needs a token first.
 		fetchSpy.mockResolvedValueOnce(tokenResponse());
 	});
@@ -614,9 +649,11 @@ describe("GcsDriver > listing, deleting a prefix, and the rest", () => {
 
 		await driver.move("a.txt", "b.txt");
 
-		expect(call(0)[1].method).toBe("POST");
-		expect(String(call(0)[0])).toContain("copyTo");
-		expect(call(1)[1].method).toBe("DELETE");
+		// The source's resource (its ACL), the copy, the delete.
+		expect(call(0)[1].method).toBe("GET");
+		expect(call(1)[1].method).toBe("POST");
+		expect(String(call(1)[0])).toContain("copyTo");
+		expect(call(2)[1].method).toBe("DELETE");
 	});
 
 	it("leaves the source in place when the copy failed", async () => {
@@ -666,7 +703,10 @@ describe("GcsDriver > a key inside a prefix", () => {
 
 	beforeEach(() => {
 		driver = buildDriver();
-		fetchSpy = vi.spyOn(globalThis, "fetch");
+		// An unmocked call fails rather than reaching the real provider.
+		fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockRejectedValue(new Error("unmocked network call"));
 		fetchSpy.mockResolvedValueOnce(tokenResponse());
 	});
 

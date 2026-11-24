@@ -86,11 +86,11 @@ describe("archive > key normalisation > the rules", () => {
 		}
 	});
 
-	it("keeps a prefix's trailing separator and lets the root be listed", () => {
+	it("reads a prefix as a directory and lets the root be listed", () => {
 		expect(normalizePrefix("")).toBe("");
 		expect(normalizePrefix("/")).toBe("");
 		expect(normalizePrefix("avatars//42/")).toBe("avatars/42/");
-		expect(normalizePrefix("/avatars/4")).toBe("avatars/4");
+		expect(normalizePrefix("/avatars/4")).toBe("avatars/4/");
 		expect(() => normalizePrefix("../")).toThrow(
 			expect.objectContaining(traversal),
 		);

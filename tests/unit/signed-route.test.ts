@@ -112,7 +112,10 @@ describe("createSignedRouteHandler", () => {
 		expect(next).not.toHaveBeenCalled();
 		expect(response.status).toHaveBeenCalledWith(200);
 		expect(response.stream).toHaveBeenCalledTimes(1);
-		expect(response.header).toHaveBeenCalledWith("Content-Type", "text/plain");
+		expect(response.header).toHaveBeenCalledWith(
+			"Content-Type",
+			"text/plain; charset=utf-8",
+		);
 	});
 
 	it("returns 403 E_ARCHIVE_INVALID_SIGNATURE when a single char in sig is flipped", async () => {
@@ -143,7 +146,7 @@ describe("createSignedRouteHandler", () => {
 		const { createHmac } = await import("node:crypto");
 		const exp = Math.floor(Date.now() / 1000) - 10;
 		const sig = createHmac("sha256", "s3cr3t-s3cr3t-s3cr3t")
-			.update(`cat.txt\n${exp}`)
+			.update(`/storage/cat.txt\n${exp}`)
 			.digest("hex");
 		const url = `/storage/cat.txt?exp=${exp}&sig=${sig}`;
 		const { ctx, response } = buildCtx("GET", url);
@@ -180,12 +183,33 @@ describe("createSignedRouteHandler", () => {
 		expect(errorCode(response.json)).toBe("E_ARCHIVE_INVALID_SIGNATURE");
 	});
 
-	it("falls through to next() for an unsigned request naming no stored file", async () => {
-		const { ctx, response } = buildCtx("GET", "/storage/cat.txt");
-		const next = vi.fn(async () => {});
-		await middleware(ctx, next);
-		expect(next).toHaveBeenCalledTimes(1);
-		expect(response.status).not.toHaveBeenCalled();
+	it("answers an unsigned request for a name not stored as it answers a private file", async () => {
+		await storage.put("secret.pdf", "top secret", { visibility: "private" });
+		const answer = async (url: string) => {
+			const { ctx, response } = buildCtx("GET", url);
+			const next = vi.fn(async () => {});
+			await middleware(ctx, next);
+			expect(next).not.toHaveBeenCalled();
+			return [response.status.mock.calls, response.json.mock.calls];
+		};
+		// Same status, same body: the answer tells nothing about which
+		// private keys are stored.
+		expect(await answer("/storage/cat.txt")).toEqual(
+			await answer("/storage/secret.pdf"),
+		);
+		expect(await answer("/storage/cat.txt")).toEqual([
+			[[403]],
+			[
+				[
+					{
+						error: {
+							code: "E_ARCHIVE_ACCESS_DENIED",
+							message: "Access denied",
+						},
+					},
+				],
+			],
+		]);
 	});
 
 	it("refuses an unsigned request for a private file", async () => {
@@ -378,7 +402,11 @@ describe("createSignedRouteHandler", () => {
 		const drive = new DriveManager({
 			default: "files",
 			services: {
-				files: services.fs({ location: root, routeBasePath: "/files" }),
+				files: services.fs({
+					visibility: "public",
+					location: root,
+					routeBasePath: "/files",
+				}),
 			},
 		});
 		expect(drive.use().publicUrl("a.txt")).toBe("/files/a.txt");

@@ -21,7 +21,7 @@ import {
 /**
  * Disks built here get temp roots, removed after each test; the working
  * directory is a fresh temp directory too, so the `./storage` default of a
- * bare `services.fs()` never lands in the repository.
+ * bare `services.fs({ visibility: "public" })` never lands in the repository.
  */
 const roots: string[] = [];
 
@@ -225,8 +225,8 @@ describe("archive > choosing a disk", () => {
 	const config = () => ({
 		default: "local" as const,
 		services: {
-			local: services.fs({ location: tempRoot() }),
-			backup: services.fs({ location: tempRoot() }),
+			local: services.fs({ visibility: "public", location: tempRoot() }),
+			backup: services.fs({ visibility: "public", location: tempRoot() }),
 		},
 	});
 
@@ -236,7 +236,7 @@ describe("archive > choosing a disk", () => {
 			() =>
 				new DriveManager({
 					default: "missing",
-					services: { local: services.fs() },
+					services: { local: services.fs({ visibility: "public" }) },
 				}),
 		).toThrow(/default disk 'missing' is not present/);
 	});
@@ -277,7 +277,7 @@ describe("archive > choosing a disk", () => {
 				() =>
 					new DriveManager({
 						default: "constructor",
-						services: { local: services.fs() },
+						services: { local: services.fs({ visibility: "public" }) },
 					}),
 			),
 		).toBe("E_ARCHIVE_UNKNOWN_DISK");
@@ -301,6 +301,34 @@ describe("archive > choosing a disk", () => {
 
 		manager.restore();
 		expect(manager.use()).toBe(real);
+	});
+
+	it("fakes in memory with no fakes config: the option does not exist", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "archive-nofakes-"));
+		try {
+			const manager = new DriveManager({
+				default: "local",
+				services: {
+					local: services.fs({ visibility: "public", location: root }),
+				},
+			});
+			const fake = manager.fake();
+			await manager.use().put("a.txt", Buffer.from("x"));
+
+			fake.assertExists("a.txt");
+			// Nothing reaches the filesystem, under the disk's root or anywhere.
+			expect(fs.readdirSync(root)).toEqual([]);
+			new DriveManager({
+				default: "local",
+				services: {
+					local: services.fs({ visibility: "public", location: root }),
+				},
+				// @ts-expect-error -- `fakes` is not a DriveConfig key.
+				fakes: { location: root },
+			});
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("fakes one disk without touching the others", () => {
@@ -337,7 +365,7 @@ describe("archive > the config helpers", () => {
 		const { defineConfig } = await import("../../src/index.js");
 		const multi = {
 			default: "local" as const,
-			services: { local: services.fs() },
+			services: { local: services.fs({ visibility: "public" }) },
 		};
 		const single = { driver: "local" as const, local: { root: "./storage" } };
 
@@ -350,7 +378,7 @@ describe("archive > the config helpers", () => {
 			"../../src/index.js"
 		);
 
-		expect(services.fs()()).toBeInstanceOf(LocalDriver);
+		expect(services.fs({ visibility: "public" })()).toBeInstanceOf(LocalDriver);
 		expect(
 			services.s3({
 				bucket: "b",
@@ -369,7 +397,7 @@ describe("archive > the config helpers", () => {
 
 	it("takes `root` as an alias of `location`", async () => {
 		const root = tempRoot();
-		const driver = services.fs({ root })();
+		const driver = services.fs({ visibility: "public", root })();
 		await driver.put("a.txt", "x");
 
 		expect(fs.readFileSync(path.join(root, "a.txt"), "utf8")).toBe("x");

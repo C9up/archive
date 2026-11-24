@@ -23,6 +23,7 @@ import {
 	DEFAULT_EXPIRES_IN,
 	parseExpiry,
 } from "../expiry.js";
+import { normalizePrefix } from "../keys.js";
 import { inferMimeType } from "../mime-types.js";
 import { DriveDirectory, DriveFile } from "../objects.js";
 import type {
@@ -97,7 +98,10 @@ export class FakeStorage implements StorageDriver {
 		const buf = Buffer.concat(chunks);
 		this.#store.set(filePath, {
 			content: buf,
-			visibility: this.#store.get(filePath)?.visibility ?? "public",
+			visibility:
+				options?.visibility ??
+				this.#store.get(filePath)?.visibility ??
+				"public",
 			lastModified: new Date(),
 			mimeType:
 				options?.contentType ??
@@ -221,11 +225,11 @@ export class FakeStorage implements StorageDriver {
 				{ help: "Confirm the source path was put() first." },
 			);
 		}
-		// Default visibility on the new object — matches LocalDriver
-		// semantics (AC 4 from Story 43.6) unless the caller overrides it.
+		// The copy takes the source's visibility unless the caller overrides
+		// it, as every real driver does.
 		this.#store.set(to, {
 			content: Buffer.from(src.content),
-			visibility: options?.visibility ?? "public",
+			visibility: options?.visibility ?? src.visibility,
 			lastModified: new Date(),
 			mimeType: options?.contentType ?? src.mimeType,
 		});
@@ -251,13 +255,17 @@ export class FakeStorage implements StorageDriver {
 		this.#store.delete(from);
 	}
 
-	async deleteAll(prefix: string): Promise<void> {
+	async deleteAll(given: string): Promise<void> {
+		// The directory the prefix names, as on every real driver: `users/1`
+		// never reaches `users/10/…`.
+		const prefix = normalizePrefix(given);
 		for (const key of [...this.#store.keys()]) {
 			if (key.startsWith(prefix)) this.#store.delete(key);
 		}
 	}
 
-	async *list(prefix: string): AsyncIterable<StorageEntry> {
+	async *list(given: string): AsyncIterable<StorageEntry> {
+		const prefix = normalizePrefix(given);
 		for (const [path, obj] of this.#store) {
 			if (!path.startsWith(prefix)) continue;
 			yield { path, size: obj.content.length, lastModified: obj.lastModified };
@@ -269,12 +277,7 @@ export class FakeStorage implements StorageDriver {
 		options?: ListAllOptions,
 	): Promise<ListAllResult> {
 		const recursive = options?.recursive ?? false;
-		const normalizedPrefix =
-			prefix === "" || prefix === "/"
-				? ""
-				: prefix.endsWith("/")
-					? prefix
-					: `${prefix}/`;
+		const normalizedPrefix = normalizePrefix(prefix);
 		const files: DriveFile[] = [];
 		const directories = new Map<string, DriveDirectory>();
 		for (const [key, obj] of this.#store) {

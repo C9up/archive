@@ -121,7 +121,7 @@ describe("ArchiveProvider", () => {
 		const url = await manager.getSignedUrl("foo.txt");
 		const parsed = new URL(url, "http://local");
 		const expected = createHmac("sha256", "a".repeat(32))
-			.update(`foo.txt\n${parsed.searchParams.get("exp") ?? ""}`)
+			.update(`/storage/foo.txt\n${parsed.searchParams.get("exp") ?? ""}`)
 			.digest("hex");
 		expect(parsed.searchParams.get("sig")).toBe(expected);
 	});
@@ -238,7 +238,9 @@ describe("ArchiveProvider > the multi-disk bindings", () => {
 		const app = buildApp({
 			archive: {
 				default: "local",
-				services: { local: services.fs({ location: tempRoot() }) },
+				services: {
+					local: services.fs({ visibility: "public", location: tempRoot() }),
+				},
 			},
 		});
 		const provider = new ArchiveProvider(app);
@@ -472,10 +474,12 @@ describe("ArchiveProvider > template helpers", () => {
 					default: "public",
 					services: {
 						public: services.fs({
+							visibility: "public",
 							location: tempRoot(),
 							signingSecret: "s".repeat(32),
 						}),
 						files: services.fs({
+							visibility: "public",
 							location: tempRoot(),
 							signingSecret: "f".repeat(32),
 							routeBasePath: "/files",

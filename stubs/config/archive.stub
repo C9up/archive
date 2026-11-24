@@ -13,6 +13,10 @@ export default defineConfig({
       location: 'storage/uploads',
       // Required before `getSignedUrl` will answer on the local disk.
       signingSecret: env.get('APP_KEY'),
+      // 'private': every file is served only through a signed URL.
+      // 'public': files are served as is, unless written with
+      // `visibility: 'private'`.
+      visibility: 'private',
     }),
     // s3: services.s3({ bucket: env.get('S3_BUCKET'), region: env.get('S3_REGION') }),
   },

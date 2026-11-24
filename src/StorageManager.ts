@@ -12,6 +12,7 @@ import { pipeline } from "node:stream/promises";
 import * as url from "node:url";
 import { errnoCode } from "./errno.js";
 import {
+	E_ARCHIVE_INVALID_DRIVER_CONFIG,
 	E_ARCHIVE_INVALID_KEY,
 	E_ARCHIVE_INVALID_ROUTE_BASE_PATH,
 	E_ARCHIVE_NOT_FOUND,
@@ -38,6 +39,7 @@ import { isKeyRefusal, normalizeKey, normalizePrefix } from "./keys.js";
 import {
 	overrideQuery,
 	requestedOverrides,
+	servedPath,
 	signedPayload,
 } from "./local-signature.js";
 import { inferMimeType } from "./mime-types.js";
@@ -109,6 +111,11 @@ export interface ListAllOptions {
 
 /** Options for {@link StorageDriver.putStream}. */
 export interface PutStreamOptions {
+	/**
+	 * Visibility of the written object, applied as `put()` applies it: on the
+	 * local disk a private marker is down before the first byte.
+	 */
+	visibility?: Visibility;
 	/** MIME type — sent as unsigned `Content-Type` on S3 uploads. Local ignores it. */
 	contentType?: string;
 	/**
@@ -156,7 +163,7 @@ export interface Metadata {
 	/** Strong or weak ETag with surrounding quotes stripped. `W/` prefix
 	 *  is preserved when the origin reports a weak tag. */
 	etag: string;
-	/** Public/private visibility. Missing-sidecar on Local = `'public'`. */
+	/** Public/private visibility. Missing marker on Local = the disk's visibility. */
 	visibility: Visibility;
 }
 
@@ -256,9 +263,9 @@ export interface StorageDriver {
 	setVisibility(filePath: string, visibility: Visibility): Promise<void>;
 	/**
 	 * Duplicate an object. Throws `E_ARCHIVE_NOT_FOUND` if `from` is
-	 * missing. Target is overwritten if it exists. Visibility is NOT
-	 * carried over unless `options.visibility` is passed — the new object
-	 * takes default visibility.
+	 * missing. Target is overwritten if it exists. The copy takes the
+	 * SOURCE's visibility unless `options.visibility` is passed (flydrive
+	 * parity): copying a private object never yields a public one.
 	 */
 	copy(from: string, to: string, options?: WriteOptions): Promise<void>;
 	/**
@@ -268,14 +275,15 @@ export interface StorageDriver {
 	 */
 	move(from: string, to: string, options?: WriteOptions): Promise<void>;
 	/**
-	 * Delete every object whose path starts with `prefix`. Local removes
-	 * the matching files (and prunes emptied directories); S3 batch-deletes;
-	 * GCS deletes per object. AdonisJS Drive parity.
+	 * Delete every object under the directory `prefix` names: `users/1` and
+	 * `users/1/` both reach `users/1/**`, never `users/10/**` (see
+	 * `normalizePrefix`). Local removes the matching files (and prunes
+	 * emptied directories); S3 batch-deletes; GCS deletes per object.
 	 */
 	deleteAll(prefix: string): Promise<void>;
 	/**
-	 * Yield one {@link StorageEntry} per object whose path starts with
-	 * `prefix`. Pagination (S3/GCS) and filesystem walk (Local) happen
+	 * Yield one {@link StorageEntry} per object under the directory `prefix`
+	 * names (same rule as {@link deleteAll}). Pagination (S3/GCS) and filesystem walk (Local) happen
 	 * lazily — callers can `break` early and no further requests are
 	 * issued. Ream superset — kept alongside the Adonis-shaped
 	 * {@link StorageDriver.listAll}.
@@ -307,6 +315,22 @@ export interface LocalDriverOptions {
 	 * disagree. A trailing `/` is dropped.
 	 */
 	routeBasePath?: string;
+	/**
+	 * The disk's visibility (flydrive's FS driver option of the same name),
+	 * default `'public'`.
+	 *
+	 * - `'private'`: every object on the disk is private, whatever a write or
+	 *   `setVisibility()` asks for. `getVisibility()` answers `private`,
+	 *   `url()` signs, and the signed route refuses every unsigned request
+	 *   before it looks at the file. Each write also leaves a private marker
+	 *   beside the file, so a static server mounted over the root, or the
+	 *   disk later switched to public, still sees it as private.
+	 * - `'public'`: an object written without a visibility is public, and a
+	 *   write or `setVisibility()` can make one private — per-object
+	 *   visibility, which flydrive's FS driver does not have (its
+	 *   `setVisibility` is a no-op).
+	 */
+	visibility?: Visibility;
 }
 
 /** Anything that releases a secret string — an environment `Secret`. */
@@ -358,6 +382,7 @@ export class LocalDriver implements StorageDriver {
 	#root: string;
 	#signingSecret: string | null;
 	#routeBasePath: string;
+	#visibility: Visibility;
 
 	/**
 	 * The only synchronous filesystem access left in this driver, and the only
@@ -371,6 +396,17 @@ export class LocalDriver implements StorageDriver {
 		// Validated before the root is created: a refused config leaves
 		// nothing behind on disk.
 		this.#routeBasePath = routeBasePath(options?.routeBasePath ?? "/storage");
+		// NAMED DEVIATION: optional, where flydrive's FS driver requires it.
+		// Omitted, the disk is public, as every local disk was before the
+		// option existed. `services.fs()` requires it, as upstream does.
+		const visibility: unknown = options?.visibility ?? "public";
+		if (visibility !== "public" && visibility !== "private") {
+			// An untyped config: a misspelt value must not quietly become public.
+			throw new E_ARCHIVE_INVALID_DRIVER_CONFIG([
+				`LocalDriver: visibility must be 'public' or 'private', got ${JSON.stringify(visibility)}.`,
+			]);
+		}
+		this.#visibility = visibility;
 		const resolved = path.resolve(root);
 		if (!fs.existsSync(resolved)) {
 			fs.mkdirSync(resolved, { recursive: true });
@@ -510,21 +546,34 @@ export class LocalDriver implements StorageDriver {
 		//
 		// Only `visibility` has a filesystem-equivalent (the marker);
 		// contentType/cacheControl/... have no local meaning.
-		await this.#writeMarked(full, options?.visibility, async () => {
-			const handle = await fsp.open(
-				full,
-				fs.constants.O_WRONLY |
-					fs.constants.O_CREAT |
-					fs.constants.O_TRUNC |
-					O_NOFOLLOW,
-				0o666,
-			);
-			try {
-				await handle.writeFile(content);
-			} finally {
-				await handle.close();
-			}
-		});
+		await this.#writeMarked(
+			full,
+			this.#intended(options?.visibility),
+			async () => {
+				const handle = await fsp.open(
+					full,
+					fs.constants.O_WRONLY |
+						fs.constants.O_CREAT |
+						fs.constants.O_TRUNC |
+						O_NOFOLLOW,
+					0o666,
+				);
+				try {
+					await handle.writeFile(content);
+				} finally {
+					await handle.close();
+				}
+			},
+		);
+	}
+
+	/**
+	 * The visibility a write leaves its object with: the one asked for on a
+	 * public disk (`undefined` keeps the object's current marker), always
+	 * `private` on a private disk.
+	 */
+	#intended(visibility: Visibility | undefined): Visibility | undefined {
+		return this.#visibility === "private" ? "private" : visibility;
 	}
 
 	/**
@@ -618,24 +667,35 @@ export class LocalDriver implements StorageDriver {
 		readable: NodeJS.ReadableStream,
 		// LocalDriver ignores contentType (inferred from extension via
 		// getMetadata) and contentLength (FS knows its own size).
-		_options?: PutStreamOptions,
+		options?: PutStreamOptions,
 	): Promise<void> {
 		const full = await this.#safePath(filePath);
 		await fsp.mkdir(path.dirname(full), { recursive: true });
-		// Same descriptor-first rule as put(): the stream is created FROM the
-		// handle, so it writes to the object the open accepted rather than to
-		// whatever the name points at by the time the first chunk arrives.
-		const handle = await fsp.open(
+		// Marked as put() marks: a private marker before the first byte, a
+		// stream that fails half-way leaves nothing behind. Ignoring the
+		// visibility here made `copyFromFs(…, { visibility: 'private' })`
+		// store a public file.
+		await this.#writeMarked(
 			full,
-			fs.constants.O_WRONLY |
-				fs.constants.O_CREAT |
-				fs.constants.O_TRUNC |
-				O_NOFOLLOW,
-			0o666,
+			this.#intended(options?.visibility),
+			async () => {
+				// Same descriptor-first rule as put(): the stream is created FROM
+				// the handle, so it writes to the object the open accepted rather
+				// than to whatever the name points at when the first chunk arrives.
+				const handle = await fsp.open(
+					full,
+					fs.constants.O_WRONLY |
+						fs.constants.O_CREAT |
+						fs.constants.O_TRUNC |
+						O_NOFOLLOW,
+					0o666,
+				);
+				// `pipeline` propagates errors and destroys the write target on
+				// failure — and closing the stream closes the handle it was made
+				// from.
+				await pipeline(readable, handle.createWriteStream());
+			},
 		);
-		// `pipeline` propagates errors and destroys the write target on
-		// failure — and closing the stream closes the handle it was made from.
-		await pipeline(readable, handle.createWriteStream());
 	}
 
 	async get(filePath: string): Promise<Buffer | null> {
@@ -727,6 +787,15 @@ export class LocalDriver implements StorageDriver {
 		return this.#routeBasePath;
 	}
 
+	/**
+	 * The disk's own visibility (the `visibility` option). The signed route
+	 * reads it to refuse every unsigned request on a private disk before it
+	 * looks at the file.
+	 */
+	getDiskVisibility(): Visibility {
+		return this.#visibility;
+	}
+
 	async url(filePath: string): Promise<string> {
 		const visibility = await this.#readVisibility(filePath);
 		if (visibility === "public") return this.publicUrl(filePath);
@@ -782,13 +851,16 @@ export class LocalDriver implements StorageDriver {
 				{ help: "put() the file before calling setVisibility()." },
 			);
 		}
-		await this.#writeMarker(full, visibility);
+		// On a private disk the object stays private (flydrive's FS driver
+		// ignores `setVisibility` altogether).
+		await this.#writeMarker(full, this.#intended(visibility) ?? visibility);
 	}
 
 	/**
 	 * Read the sidecar marker.
-	 *   - Missing sidecar → `'public'` (the documented default; sidecar is only
-	 *     written when `setVisibility('private')` was explicitly called).
+	 *   - Private disk → `'private'` for every key, marker or not (flydrive's
+	 *     FS driver answers its disk option for every key).
+	 *   - Missing sidecar → `'public'`, the public disk's default.
 	 *   - Corrupted sidecar (unreadable file / malformed JSON) → THROW. A
 	 *     silent fallback to `'public'` would turn any disk corruption or I/O
 	 *     blip into a private→public downgrade for an existing private file.
@@ -797,6 +869,7 @@ export class LocalDriver implements StorageDriver {
 	async #readVisibility(filePath: string): Promise<Visibility> {
 		const sidecar =
 			(await this.#safePath(filePath)) + VISIBILITY_SIDECAR_SUFFIX;
+		if (this.#visibility === "private") return "private";
 		let raw: string;
 		try {
 			raw = await fsp.readFile(sidecar, "utf8");
@@ -885,7 +958,14 @@ export class LocalDriver implements StorageDriver {
 		// Response-header overrides are signed with the rest and carried in the
 		// query, where the signed route reads, verifies and emits them.
 		const overrides = requestedOverrides(options ?? {});
-		const message = signedPayload(key, exp, overrides);
+		// The served path is signed, route base path included, as upstream
+		// signs the whole route URL: two disks sharing a secret do not accept
+		// each other's URLs.
+		const message = signedPayload(
+			servedPath(this.#routeBasePath, key),
+			exp,
+			overrides,
+		);
 		const sig = createHmac("sha256", secret).update(message).digest("hex");
 		const url = `${this.publicUrl(key)}?exp=${exp}&sig=${sig}`;
 		return overrides.length === 0 ? url : `${url}&${overrideQuery(overrides)}`;
@@ -919,13 +999,31 @@ export class LocalDriver implements StorageDriver {
 				{ help: "Confirm the source path was put() first." },
 			);
 		}
-		await fsp.mkdir(path.dirname(toFull), { recursive: true });
-		// Intentionally do NOT copy the visibility sidecar — new object
-		// takes default visibility unless the caller asks otherwise. A private
-		// one is marked before the bytes are copied, as put() does.
-		await this.#writeMarked(toFull, options?.visibility, () =>
-			fsp.copyFile(fromFull, toFull),
+		// The copy takes the source's visibility unless the caller asks
+		// otherwise, as flydrive's S3 and GCS drivers do: left to the default,
+		// the copy of a private file was public and served unsigned. Read
+		// before anything is written, so a damaged source marker throws first.
+		const target = this.#intended(
+			options?.visibility ?? (await this.#ownVisibility(from, fromFull)),
 		);
+		await fsp.mkdir(path.dirname(toFull), { recursive: true });
+		// A private one is marked before the bytes are copied, as put() does.
+		await this.#writeMarked(toFull, target, () =>
+			copyNoFollow(fromFull, toFull),
+		);
+	}
+
+	/**
+	 * The visibility the marker of the file at `full` states, or `undefined`
+	 * when it has none. A damaged marker throws.
+	 */
+	async #ownVisibility(
+		filePath: string,
+		full: string,
+	): Promise<Visibility | undefined> {
+		return (await exists(full + VISIBILITY_SIDECAR_SUFFIX))
+			? this.#readVisibility(filePath)
+			: undefined;
 	}
 
 	async move(from: string, to: string, options?: WriteOptions): Promise<void> {
@@ -945,13 +1043,9 @@ export class LocalDriver implements StorageDriver {
 		// silently downgrade private→public. `#readVisibility` throws on
 		// corruption, which surfaces here BEFORE we mutate anything.
 		const fromSidecar = fromFull + VISIBILITY_SIDECAR_SUFFIX;
-		const capturedVisibility: Visibility | undefined = (await exists(
-			fromSidecar,
-		))
-			? await this.#readVisibility(from)
-			: undefined;
+		const capturedVisibility = await this.#ownVisibility(from, fromFull);
 		// An explicit visibility override wins over the preserved value.
-		const target = options?.visibility ?? capturedVisibility;
+		const target = this.#intended(options?.visibility ?? capturedVisibility);
 		await fsp.mkdir(path.dirname(toFull), { recursive: true });
 		// A private target is marked BEFORE the file arrives: renamed first, the
 		// moved private file sat at the target with no marker — public — until
@@ -968,8 +1062,10 @@ export class LocalDriver implements StorageDriver {
 			}
 			// Cross-device rename — fall back to copy+unlink. A half-copied
 			// target is removed, and its marker only once the data is gone.
+			// Copied through descriptors, as copy() is: `copyFile` followed a
+			// dangling link planted at the target out of the root.
 			try {
-				await fsp.copyFile(fromFull, toFull);
+				await copyNoFollow(fromFull, toFull);
 			} catch (copyErr) {
 				await discardPrivate(toFull);
 				throw copyErr;
@@ -1035,9 +1131,8 @@ export class LocalDriver implements StorageDriver {
 		const recursive = options?.recursive ?? false;
 		const files: DriveFile[] = [];
 		const directories = new Map<string, DriveDirectory>();
-		const given = normalizePrefix(prefix);
-		const normalizedPrefix =
-			given === "" || given.endsWith("/") ? given : `${given}/`;
+		// A directory prefix (`users/1/`), or `""` for the root.
+		const normalizedPrefix = normalizePrefix(prefix);
 		for await (const entry of this.list(normalizedPrefix)) {
 			if (recursive) {
 				files.push(
@@ -1083,8 +1178,8 @@ export class LocalDriver implements StorageDriver {
 	async *list(given: string): AsyncIterable<StorageEntry> {
 		const prefix = normalizePrefix(given);
 		// Start the walk at the deepest directory the prefix names, not at the
-		// root: `avatars/42/` reads `avatars/42`, `avatars/4` reads
-		// `avatars`. Walking the whole root and filtering afterwards cost the
+		// root: `avatars/42` (normalised to `avatars/42/`) reads `avatars/42`.
+		// Walking the whole root and filtering afterwards cost the
 		// size of the entire disk for every listing, however narrow.
 		const slash = prefix.lastIndexOf("/");
 		const dir = slash === -1 ? "" : prefix.slice(0, slash);
@@ -1187,6 +1282,66 @@ async function discardPrivate(full: string): Promise<void> {
 		await fsp.unlink(full + VISIBILITY_SIDECAR_SUFFIX);
 	} catch {
 		// An orphan marker serves nothing.
+	}
+}
+
+/**
+ * Copy the file at `from` to `to`, two paths `#safePath` resolved, through
+ * descriptors opened with O_NOFOLLOW at both ends.
+ *
+ * `copyFile` opens its target by name and follows a link: `#safePath` cannot
+ * see a DANGLING link (its realpath fails, the walk checks the parent), so a
+ * link planted at the target made a copy create its target outside the root.
+ * The source is opened the same way, so a link swapped in there after the
+ * check is not read into the disk.
+ */
+/** Bytes read and written per step of {@link copyNoFollow}. */
+const COPY_CHUNK = 64 * 1024;
+
+async function copyNoFollow(from: string, to: string): Promise<void> {
+	const source = await fsp.open(from, fs.constants.O_RDONLY | O_NOFOLLOW);
+	try {
+		// Not truncated at open: when both names are one file, truncating
+		// would empty the source before it is read.
+		const target = await fsp.open(
+			to,
+			fs.constants.O_WRONLY | fs.constants.O_CREAT | O_NOFOLLOW,
+			0o666,
+		);
+		try {
+			const [read, written] = await Promise.all([source.stat(), target.stat()]);
+			// The same key, or a hard link to the source: nothing to copy.
+			if (read.dev === written.dev && read.ino === written.ino) return;
+			await target.truncate(0);
+			// Chunk by chunk through the two descriptors, which this function
+			// owns and closes: a stream made from a handle closes it itself.
+			const chunk = Buffer.allocUnsafe(COPY_CHUNK);
+			let position = 0;
+			for (;;) {
+				const { bytesRead } = await source.read(
+					chunk,
+					0,
+					chunk.length,
+					position,
+				);
+				if (bytesRead === 0) return;
+				let written = 0;
+				while (written < bytesRead) {
+					const { bytesWritten } = await target.write(
+						chunk,
+						written,
+						bytesRead - written,
+						position + written,
+					);
+					written += bytesWritten;
+				}
+				position += bytesRead;
+			}
+		} finally {
+			await target.close();
+		}
+	} finally {
+		await source.close();
 	}
 }
 

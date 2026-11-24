@@ -49,3 +49,24 @@ export const DEFAULT_EXTENSIONS: readonly string[] = Object.keys(
 export function inferMimeType(ext: string): string {
 	return MIME_TYPES[ext] ?? "application/octet-stream";
 }
+
+/**
+ * Types that are text without a `text/` prefix, so carry a charset. The rest
+ * of `text/*` is covered by the prefix; everything else is binary.
+ */
+const UTF8_TYPES = new Set(["application/javascript", "application/json"]);
+
+/**
+ * A full `Content-Type` header value for a bare type: `; charset=utf-8`
+ * appended to a text type, as upstream's `response.type()` does
+ * (`mime-types.contentType`). A type that already names a charset, and a
+ * binary one, are sent as is.
+ */
+export function contentTypeHeader(type: string): string {
+	if (/;\s*charset=/i.test(type)) return type;
+	const [head = ""] = type.split(";");
+	const base = head.trim().toLowerCase();
+	return base.startsWith("text/") || UTF8_TYPES.has(base)
+		? `${type}; charset=utf-8`
+		: type;
+}
